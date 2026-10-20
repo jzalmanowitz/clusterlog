@@ -9,6 +9,7 @@ homelab box; all data is one SQLite file you own.
 
 - Full requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 - What's next: [TODO.md](TODO.md)
+- Ideas to review later: [IDEAS.md](IDEAS.md)
 
 ---
 
