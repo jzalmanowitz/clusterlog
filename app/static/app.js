@@ -1,0 +1,1140 @@
+/* ClusterLog front end — plain JS, no build step.
+   Views are rendered from the URL hash (#/cycle/3, #/attack/12, ...).
+   Times are local wall-clock strings "YYYY-MM-DDTHH:MM", as stored. */
+'use strict';
+
+const app = document.getElementById('app');
+const bar = document.getElementById('bar');
+
+const PHASES = [['shadow', 'Shadows'], ['onset', 'Onset'], ['build', 'Building'], ['peak', 'Peak'], ['subside', 'Subsiding']];
+const PHASE_LABEL = Object.fromEntries(PHASES);
+const CATS = [['abortive', 'Abortive'], ['preventive', 'Preventive'], ['emergent', 'Emergent / transitional'],
+  ['supplement', 'Supplement'], ['other', 'Other']];
+const CAT_LABEL = Object.fromEntries(CATS);
+const SIDES = ['Left', 'Right', 'Both', 'Alternating'];
+const TAGS = { pain: 'PAIN', treatment: 'MED', note: 'NOTE', event: 'EVENT' };
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const S = {
+  treatments: [], settings: {}, entries: {}, attacks: {},
+  attack: null,          // attack shown on the attack screen
+  tab: 'journal',        // cycle screen tab
+  meds: 'key',           // chart medication filter
+  justEnded: null,       // id of an attack just ended (shows the summary card)
+};
+
+/* ---------------------------------------------------------------- utils */
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = n => String(n).padStart(2, '0');
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+async function api(path, opts = {}) {
+  const o = { method: 'GET', headers: {}, ...opts };
+  if (o.body !== undefined && typeof o.body !== 'string') {
+    o.body = JSON.stringify(o.body);
+    o.headers['Content-Type'] = 'application/json';
+  }
+  let r;
+  try { r = await fetch('/api' + path, o); } catch { throw new Error("Can't reach the ClusterLog server"); }
+  if (!r.ok) {
+    let msg = `${r.status} ${r.statusText}`;
+    try {
+      const j = await r.json();
+      if (typeof j.detail === 'string') msg = j.detail;
+      else if (Array.isArray(j.detail)) msg = j.detail.map(d => `${(d.loc || []).slice(-1)[0]}: ${d.msg}`).join('; ');
+    } catch { /* not json */ }
+    throw new Error(msg);
+  }
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('json') ? r.json() : r.text();
+}
+
+/* ---------------------------------------------------------------- time */
+
+const localStr = (d = new Date()) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const nowLocal = () => localStr();
+const today = () => nowLocal().slice(0, 10);
+function toDate(s) {
+  const [y, m, d] = s.slice(0, 10).split('-').map(Number);
+  return new Date(y, m - 1, d, +s.slice(11, 13) || 0, +s.slice(14, 16) || 0);
+}
+const addMin = (s, m) => localStr(new Date(toDate(s).getTime() + m * 60000));
+function addDays(d, n) { const x = toDate(d); return localStr(new Date(x.getFullYear(), x.getMonth(), x.getDate() + n)).slice(0, 10); }
+const minsBetween = (a, b) => Math.round((toDate(b) - toDate(a)) / 60000);
+const minsSince = s => Math.max(0, Math.floor((Date.now() - toDate(s)) / 60000));
+const dayDiff = (a, b) => Math.round((toDate(b.slice(0, 10)) - toDate(a.slice(0, 10))) / 86400000);
+const hhmm = s => s.slice(11, 13) + s.slice(14, 16);
+function fmtDur(m) {
+  if (m == null || isNaN(m)) return '–';
+  m = Math.max(0, Math.round(m));
+  const h = Math.floor(m / 60);
+  if (h >= 48) return `${Math.floor(h / 24)}d`;
+  return h ? `${h}h${pad(m % 60)}m` : `${m}m`;
+}
+function dayLabel(d) {
+  const x = toDate(d);
+  const y = x.getFullYear() !== new Date().getFullYear() ? ' ' + x.getFullYear() : '';
+  return `${DOW[x.getDay()]} ${x.getDate()} ${MON[x.getMonth()]}${y}`;
+}
+const shortDate = d => { const x = toDate(d); return `${x.getDate()} ${MON[x.getMonth()]}`; };
+const fmtDate = d => { const x = toDate(d); return `${x.getDate()} ${MON[x.getMonth()]} ${x.getFullYear()}`; };
+const cycleDay = (c, d) => dayDiff(c.started_on, d) + 1;
+
+/** Week group for a date: weeks inside a cycle (days 1–7 = week 1), else Monday-based calendar weeks. */
+function weekOf(cycle, d) {
+  if (cycle) {
+    const n = Math.floor(dayDiff(cycle.started_on, d) / 7) + 1;
+    if (n >= 1) {
+      const ws = addDays(cycle.started_on, (n - 1) * 7);
+      return { key: ws, label: `Week ${n}`, sub: `${shortDate(ws)} – ${shortDate(addDays(ws, 6))}` };
+    }
+  }
+  const ws = addDays(d, -((toDate(d).getDay() + 6) % 7));
+  return { key: ws, label: `Week of ${shortDate(ws)}`, sub: `${shortDate(ws)} – ${shortDate(addDays(ws, 6))}` };
+}
+
+/* ---------------------------------------------------------------- ui helpers */
+
+function pageHead(title, back, right = '') {
+  return `<header class="top">${back ? `<a class="back" href="${back}" aria-label="Back">‹</a>` : ''}
+    <h1>${title}</h1>${right}</header>`;
+}
+
+function setBar(html) {
+  bar.innerHTML = html ? `<div class="inner">${html}</div>` : '';
+  bar.hidden = !html;
+  document.body.classList.toggle('has-bar', !!html);
+}
+
+let toastTimer;
+function toast(msg, actions = []) {
+  const t = $('#toast');
+  t.innerHTML = `<span>${esc(msg)}</span>` + actions.map((a, i) => `<button type="button" data-i="${i}">${esc(a.label)}</button>`).join('');
+  t.hidden = false;
+  t.onclick = async ev => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    t.hidden = true;
+    try { await actions[+b.dataset.i].fn(); } catch (e) { toast(e.message); }
+  };
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, actions.length ? 8000 : 3500);
+}
+
+const opt = (type, name, value, label, checked) =>
+  `<label class="opt"><input type="${type}" name="${name}" value="${esc(value)}"${checked ? ' checked' : ''}><span class="chip">${esc(label)}</span></label>`;
+const radios = (name, opts, val) => opts.map(([v, l]) => opt('radio', name, v, l, String(v) === String(val ?? ''))).join('');
+const checks = (name, opts, vals) => opts.map(v => opt('checkbox', name, v, v, (vals || []).includes(v))).join('');
+const kipRadios = (val) => `<div class="kip-grid">${[...Array(11).keys()].map(i =>
+  `<label class="opt" style="display:block"><input type="radio" name="kip" value="${i}"${String(val) === String(i) ? ' checked' : ''}><span class="chip" style="width:100%;justify-content:center;min-height:56px;border-radius:12px;font-size:20px">${i}</span></label>`).join('')}</div>`;
+
+function union(base, extra) {
+  const out = [...(base || [])];
+  for (const x of extra || []) if (!out.some(y => y.toLowerCase() === x.toLowerCase())) out.push(x);
+  return out;
+}
+
+function formValues(form, submitter) {
+  const out = {};
+  for (const el of form.elements) {
+    if (!el.name || el.disabled) continue;
+    if (el.type === 'checkbox') {
+      if (el.dataset.bool !== undefined) out[el.name] = el.checked;
+      else { out[el.name] = out[el.name] || []; if (el.checked) out[el.name].push(el.value); }
+    } else if (el.type === 'radio') { if (el.checked) out[el.name] = el.value; else if (!(el.name in out)) out[el.name] = null; }
+    else if (el.tagName !== 'BUTTON') out[el.name] = el.value;
+  }
+  if (submitter && submitter.name) out[submitter.name] = submitter.value;
+  return out;
+}
+
+/** Bottom sheet with a form. onSubmit(values, form) may throw to keep it open. */
+function openSheet(title, body, { onSubmit, submitLabel = 'Save', extra = '', onOpen } = {}) {
+  closeSheet();
+  const wrap = document.createElement('div');
+  wrap.className = 'sheet-wrap';
+  wrap.innerHTML = `<div class="sheet-bg" data-act="closeSheet"></div>
+    <form class="sheet" novalidate>
+      <div class="sheet-head"><h1>${esc(title)}</h1><button type="button" class="x" data-act="closeSheet" aria-label="Close">✕</button></div>
+      <button type="submit" disabled hidden aria-hidden="true"></button>
+      <div class="sheet-body">${body}</div>
+      ${(onSubmit && submitLabel) || extra ? `<div class="sheet-foot">${extra}${onSubmit && submitLabel ? `<button class="btn primary" type="submit">${esc(submitLabel)}</button>` : ''}</div>` : ''}
+    </form>`;
+  document.body.appendChild(wrap);
+  document.body.classList.add('noscroll');
+  const form = $('form', wrap);
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    if (!onSubmit || form.dataset.busy) return;
+    form.dataset.busy = '1';
+    const hash = location.hash;
+    try {
+      const keepOpen = await onSubmit(formValues(form, ev.submitter), form);
+      if (keepOpen === true) return;
+      closeSheet();
+      if (location.hash === hash) await refresh();
+    } catch (e) { toast(e.message); }
+    finally { delete form.dataset.busy; }
+  });
+  if (onOpen) onOpen(form);
+  return form;
+}
+function closeSheet() {
+  document.querySelectorAll('.sheet-wrap').forEach(w => w.remove());
+  document.body.classList.remove('noscroll');
+}
+
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch { /* http: fall back */ }
+  const ta = document.createElement('textarea');
+  ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;opacity:0';
+  document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
+  let ok = false; try { ok = document.execCommand('copy'); } catch { /* ignore */ }
+  ta.remove(); return ok;
+}
+
+/* ---------------------------------------------------------------- data helpers */
+
+async function loadTreatments() { S.treatments = await api('/treatments?include_archived=true'); }
+async function loadSettings() { S.settings = await api('/settings'); }
+const activeTreatments = () => S.treatments.filter(t => !t.archived);
+const treatment = id => S.treatments.find(t => t.id === +id);
+const recentSince = () => api('/recent?since=' + encodeURIComponent(addMin(nowLocal(), -24 * 60)));
+function doseLabel(t, amount) {
+  amount = (amount ?? '').trim(); const uom = (t.uom || '').trim();
+  if (!amount) return t.name;
+  if (!uom) return `${t.name}, ${amount}`;
+  return t.uom_prefix ? `${t.name}, ${uom} ${amount}` : `${t.name}, ${amount} ${uom}`;
+}
+function weatherBits(w, prev) {
+  if (!w) return '';
+  const arrow = k => { if (!prev || prev[k] == null) return ''; const d = w[k] - prev[k]; return d > 0.005 ? ' ↑' : d < -0.005 ? ' ↓' : ' →'; };
+  return `${w.temp_c.toFixed(1)}°C${arrow('temp_c')} · ${w.humidity}%${arrow('humidity')} · ${w.pressure_cmhg.toFixed(2)} cmHg${arrow('pressure_cmhg')}`;
+}
+
+/* ---------------------------------------------------------------- journal */
+
+function entryText(e) {
+  const note = e.note ? esc(e.note) : '';
+  if (e.kind === 'pain') return `<b>KIP ${e.kip}</b>${e.phase ? ' · ' + PHASE_LABEL[e.phase] : ''}${note ? ' — ' + note : ''}`;
+  if (e.kind === 'treatment' || e.kind === 'event') return `<b>${esc(e.title)}</b>${note ? ' — ' + note : ''}`;
+  return note;
+}
+const entryRow = e => `<div class="jrow${e.attack_id ? ' in' : ''}" data-act="editEntry" data-id="${e.id}" role="button" tabindex="0">
+  <span class="t">${hhmm(e.at)}</span><span class="tag">${TAGS[e.kind]}</span><span class="txt">${entryText(e)}</span></div>`;
+
+function attackRow(a, which, link = true) {
+  const tagName = link ? 'a' : 'div';
+  const href = link ? ` href="#/attack/${a.id}"` : ` data-act="editAttack" data-id="${a.id}" role="button" tabindex="0"`;
+  const dur = a.ended_at ? minsBetween(a.started_at, a.ended_at) : null;
+  if (which === 'start') {
+    const detail = [a.side && `${a.side} side`, (a.locations || []).join(', '), (a.pain_types || []).join(', ')].filter(Boolean).join(' · ');
+    const w = a.weather ? weatherBits(a.weather) : '';
+    return `<${tagName} class="jrow attack in"${href}><span class="t">${hhmm(a.started_at)}</span><span class="tag">▶</span>
+      <span class="txt">HEADACHE #${a.number}${a.ended_at ? ` · ${fmtDur(dur)}${a.peak_kip != null ? ' · peak ' + a.peak_kip : ''}` : ' · in progress'}
+      ${detail ? `<span class="sub">${esc(detail)}</span>` : ''}${w ? `<span class="sub">${esc(w)}</span>` : ''}</span></${tagName}>`;
+  }
+  return `<${tagName} class="jrow attack in"${href}><span class="t">${hhmm(a.ended_at)}</span><span class="tag">■</span>
+    <span class="txt">END #${a.number} <span class="muted">· lasted ${fmtDur(dur)}</span></span></${tagName}>`;
+}
+
+/** Entries + attack start/end rows, grouped by (cycle) week and day. */
+function journalHTML(attacks, entries, cycle, { asc = false, weeks = true, links = true } = {}) {
+  attacks.forEach(a => { S.attacks[a.id] = a; });
+  entries.forEach(e => { S.entries[e.id] = e; });
+  const items = [];
+  for (const a of attacks) {
+    items.push({ at: a.started_at, o: 0, id: a.id, html: attackRow(a, 'start', links) });
+    if (a.ended_at) items.push({ at: a.ended_at, o: 2, id: a.id, html: attackRow(a, 'end', links) });
+  }
+  for (const e of entries) items.push({ at: e.at, o: 1, id: e.id, html: entryRow(e) });
+  items.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : (x.o - y.o) || (x.id - y.id)));
+  const byDay = new Map();
+  for (const it of items) {
+    const d = it.at.slice(0, 10);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(it);
+  }
+  const days = [...byDay.keys()].sort();
+  if (!asc) days.reverse();
+  let out = '', week = null;
+  for (const d of days) {
+    if (weeks) {
+      const w = weekOf(cycle, d);
+      if (w.key !== week) { week = w.key; out += `<h2 class="week">${w.label} <span class="muted">· ${w.sub}</span></h2>`; }
+    }
+    const n = attacks.filter(a => a.started_at.slice(0, 10) === d).length;
+    out += `<h3 class="day">${dayLabel(d)}${cycle ? ` <span class="muted">· day ${cycleDay(cycle, d)}</span>` : ''}${n ? ` <span class="muted">· ${plural(n, 'headache')}</span>` : ''}</h3>`;
+    out += byDay.get(d).map(i => i.html).join('');
+  }
+  return out;
+}
+
+function recentHTML(list, attack) {
+  if (!list.length) return '';
+  const hints = attack?.hints?.treatments || {};
+  const inAttack = new Set((attack?.entries || []).filter(e => e.kind === 'treatment').map(e => String(e.treatment_id)));
+  return `<section><h2>Since last dose · past 24h</h2>${list.map(r => {
+    const h = hints[r.treatment_id];
+    const hint = attack && !attack.ended_at && inAttack.has(String(r.treatment_id)) && h && h.n >= 2
+      ? `<div class="small muted">headaches usually end ~${fmtDur(h.median)} after this${h.p25 != null ? ` (${fmtDur(h.p25)}–${fmtDur(h.p75)})` : ''} · n=${h.n}</div>` : '';
+    return `<div class="list-row"><div><b>${esc(r.title)}</b>${r.count > 1 ? ` <span class="muted">×${r.count}</span>` : ''}${hint}</div>
+      <div><b><span class="ago" data-since="${r.last_at}">${fmtDur(minsSince(r.last_at))}</span></b> <span class="muted">ago</span></div></div>`;
+  }).join('')}</section>`;
+}
+
+/* ---------------------------------------------------------------- views: home */
+
+async function viewHome() {
+  const [cycles, active, learn] = await Promise.all([api('/cycles?today=' + today()), api('/attacks/active'), api('/learnings')]);
+  const openCycle = cycles.find(c => !c.ended_on);
+  let h = pageHead('ClusterLog', null, `<a class="btn sm ghost" href="#/settings">Settings</a>`);
+  if (active) h += activeBanner(active);
+  h += `<section><div class="sec-head"><h2>Cycles</h2>${cycles.length ? `<button class="btn sm" data-act="newCycle">+ New cycle</button>` : ''}</div>`;
+  if (!cycles.length) {
+    h += `<div class="empty"><h1>No cycles yet</h1>
+      <p>A cycle is a container for one cluster period. Start one when a new cycle begins — every headache, dose and note goes inside it.</p>
+      <button class="btn primary wide" data-act="newCycle">Start a new cycle</button></div>`;
+  }
+  h += cycles.map(cycleCard).join('') + `</section>
+    <section><h2>More</h2>
+      <a class="card" href="#/loose"><b>Outside a cycle</b><div class="small muted">Injections, appointments &amp; notes between cycles</div></a>
+      <a class="card" href="#/learnings"><b>Cycle learnings</b><div class="small muted">${learn.length ? `${plural(learn.length, 'note')} from past you` : 'What past you wants future you to remember'}</div></a>
+      <a class="card" href="#/export"><b>Report for neurologist</b><div class="small muted">Pick dates · email · print · CSV</div></a>
+      <a class="card" href="#/treatments"><b>Meds &amp; treatments</b><div class="small muted">${activeTreatments().length} defined</div></a>
+    </section>`;
+  app.innerHTML = h;
+  if (active) setBar(`<a class="btn primary big" href="#/attack/${active.id}">● Open headache · <span class="ago" data-since="${active.started_at}">${fmtDur(minsSince(active.started_at))}</span></a>`);
+  else if (openCycle) setBar(`<button class="btn primary big" data-act="startAttack" data-cycle="${openCycle.id}">Start headache</button>`);
+}
+
+function cycleCard(c) {
+  const ended = !!c.ended_on;
+  const len = cycleDay(c, ended ? c.ended_on : today());
+  return `<a class="card${ended ? '' : ' solid'}" href="#/cycle/${c.id}">
+    <div class="card-title"><span>${esc(c.name)}</span>${ended ? '' : '<span class="pill">ACTIVE</span>'}</div>
+    <div class="small muted">${ended ? `${fmtDate(c.started_on)} – ${fmtDate(c.ended_on)} · ${len} days` : `Day ${len} · week ${Math.floor((len - 1) / 7) + 1} · since ${fmtDate(c.started_on)}`}
+      · ${plural(c.attack_count, 'headache')}${ended ? '' : ` · ${c.today_count} today`}</div></a>`;
+}
+
+function activeBanner(a) {
+  return `<a class="banner" href="#/attack/${a.id}">
+    <div class="small"><b>● HEADACHE IN PROGRESS</b>${a.cycle_name ? ' · ' + esc(a.cycle_name) : ''}</div>
+    <div class="num"><span class="ago" data-since="${a.started_at}">${fmtDur(minsSince(a.started_at))}</span></div>
+    <div class="small muted">started ${hhmm(a.started_at)}${a.last_kip != null ? ` · KIP ${a.last_kip}` : ''} · tap to open</div></a>`;
+}
+
+/* ---------------------------------------------------------------- views: cycle / loose log */
+
+async function viewCycle(id) { await viewLog(await api('/cycles/' + id)); }
+async function viewLoose() { await viewLog(null); }
+
+async function viewLog(cycle) {
+  const cid = cycle ? cycle.id : 'none';
+  const [j, active, recent] = await Promise.all([api('/journal?cycle_id=' + cid), api('/attacks/active'), recentSince()]);
+  const here = active && (cycle ? active.cycle_id === cycle.id : active.cycle_id == null);
+  let h = pageHead(cycle ? esc(cycle.name) : 'Outside a cycle', '#/',
+    cycle ? `<button class="btn sm ghost" data-act="editCycle" data-id="${cycle.id}">Edit</button>` : '');
+  if (cycle) {
+    const len = cycleDay(cycle, cycle.ended_on || today());
+    h += `<p class="muted">${cycle.ended_on ? `Ended ${fmtDate(cycle.ended_on)} · lasted ${len} days` : `Day ${len} · week ${Math.floor((len - 1) / 7) + 1} · started ${fmtDate(cycle.started_on)}`}</p>`;
+  } else {
+    h += `<p class="muted">For things between cycles — e.g. an Emgality injection, a nerve block, or an appointment.</p>`;
+  }
+  if (active && !here) h += activeBanner(active);
+  const t = today();
+  const todayAtt = j.attacks.filter(a => a.started_at.slice(0, 10) === t);
+  const lastEnded = j.attacks.filter(a => a.ended_at).sort((a, b) => (a.ended_at < b.ended_at ? -1 : 1)).pop();
+  if (j.attacks.length || cycle) {
+    h += `<div class="tiles">
+      <div class="tile"><div class="num">${todayAtt.length}</div><div class="small">headaches today</div></div>
+      ${cycle?.ended_on ? '' : `<div class="tile"><div class="num">${lastEnded ? `<span class="ago" data-since="${lastEnded.ended_at}">${fmtDur(minsSince(lastEnded.ended_at))}</span>` : '–'}</div><div class="small">since last headache ended</div></div>`}
+      <div class="tile"><div class="num">${j.attacks.length}</div><div class="small">headaches ${cycle ? 'this cycle' : 'logged'}</div></div>
+    </div>`;
+  }
+  h += recentHTML(recent);
+  if (cycle && cycle.ended_on) {
+    h += `<section><div class="sec-head"><h2>Cycle learnings</h2><button class="btn sm ghost" data-act="editLearnings" data-id="${cycle.id}">${cycle.learnings ? 'Edit' : 'Write'}</button></div>
+      ${cycle.learnings ? `<div class="card"><div class="txt" style="white-space:pre-wrap">${esc(cycle.learnings)}</div></div>`
+        : `<div class="empty"><p>What should future you remember from this cycle?</p><button class="btn primary" data-act="editLearnings" data-id="${cycle.id}">Write learnings</button></div>`}</section>`;
+  }
+  h += `<div class="tabs" role="tablist">${[['journal', 'Journal'], ['chart', 'Chart'], ['stats', 'Stats']].map(([k, l]) =>
+    `<button role="tab" class="${S.tab === k ? 'on' : ''}" data-act="tab" data-v="${k}">${l}</button>`).join('')}</div>
+    <div id="tabbody"></div>`;
+  app.innerHTML = h;
+
+  const body = $('#tabbody');
+  if (S.tab === 'journal') {
+    body.innerHTML = (j.attacks.length || j.entries.length) ? journalHTML(j.attacks, j.entries, cycle)
+      : `<div class="empty"><p>Nothing logged yet.</p><p class="small">Tap <b>Start headache</b> when shadows begin, or log a med or note below.</p></div>`;
+  } else if (S.tab === 'chart') {
+    renderChart(body, cid);
+  } else {
+    renderStats(body, cid);
+  }
+
+  const c = cycle ? cycle.id : '';
+  setBar(`${here ? `<a class="btn primary grow" href="#/attack/${active.id}">● Headache · <span class="ago" data-since="${active.started_at}">${fmtDur(minsSince(active.started_at))}</span></a>`
+    : `<button class="btn primary grow" data-act="startAttack" data-cycle="${c}">Start headache</button>`}
+    <button class="btn" data-act="addEvent" ${here ? `data-attack="${active.id}"` : `data-cycle="${c}"`}>+ Add event</button>`);
+}
+
+async function renderChart(el, cid) {
+  el.innerHTML = `<div class="chips" style="margin-top:16px">${[['key', 'Key meds'], ['all', 'All meds'], ['none', 'No meds']].map(([k, l]) =>
+    `<button class="chip ${S.meds === k ? 'on' : ''}" data-act="meds" data-v="${k}">${l}</button>`).join('')}</div>
+    <div class="chart-scroll" id="chartbox"><p class="muted">Loading chart…</p></div>
+    <p class="help">Each column is a day; top is midnight, bottom is midnight. ● headache start (bigger = higher peak KIP), bar = duration,
+    ◇ abortive dose, ◆ preventive / emergent dose. Bottom strip: headaches per day. Week lines are cycle weeks. Scroll sideways for older days.</p>`;
+  const svg = await api(`/chart/daily.svg?cycle_id=${cid}&meds=${S.meds}&today=${today()}`);
+  const box = $('#chartbox');
+  if (!box) return;
+  box.innerHTML = svg;
+  box.scrollLeft = box.scrollWidth;
+}
+
+async function renderStats(el, cid) {
+  el.innerHTML = `<p class="muted">Loading…</p>`;
+  const s = await api(`/stats?cycle_id=${cid}&today=${today()}`);
+  const du = s.duration;
+  let h = `<div class="tiles" style="margin-top:16px">
+    <div class="tile"><div class="num">${s.attacks}</div><div class="small">headaches · ${s.per_day_avg}/day</div></div>
+    <div class="tile"><div class="num">${fmtDur(du.median)}</div><div class="small">median length${du.n ? ` · n=${du.n}` : ''}</div></div>
+    <div class="tile"><div class="num">${s.peak.mean ?? '–'}</div><div class="small">avg peak KIP · max ${s.peak.max ?? '–'}</div></div>
+    <div class="tile"><div class="num">${fmtDur(du.max)}</div><div class="small">longest</div></div>
+    <div class="tile"><div class="num">${s.free_days}</div><div class="small">headache-free days of ${s.days}</div></div>
+    <div class="tile"><div class="num">${du.p25 != null ? `${fmtDur(du.p25)}` : '–'}</div><div class="small">${du.p25 != null ? `to ${fmtDur(du.p75)} · middle half` : 'middle half (needs 4+)'}</div></div>
+  </div>`;
+  h += `<section><h2>Headache start time</h2>${hourSVG(s.by_hour)}</section>`;
+  if (s.weeks.length) {
+    h += `<section><h2>By week</h2><div class="tbl-scroll"><table class="t"><tr><th>Week</th><th>Headaches</th><th>Doses</th><th>Median</th><th>Max KIP</th></tr>
+      ${s.weeks.slice().reverse().map(w => `<tr><td>${esc(w.label)}</td><td>${w.attacks}</td><td>${w.meds}</td><td>${fmtDur(w.median_duration)}</td><td>${w.max_kip ?? '–'}</td></tr>`).join('')}
+      </table></div></section>`;
+  }
+  if (s.treatments.length) {
+    h += `<section><h2>Treatments</h2>${s.treatments.map(t => `<div class="list-row"><div><b>${esc(t.name)}</b>
+      <div class="small muted">${t.uses} uses${t.in_attacks ? ` · ${t.in_attacks} during attacks` : ''}</div></div>
+      <div>${t.to_end.n ? `<b>${fmtDur(t.to_end.median)}</b><div class="small muted">to headache end · n=${t.to_end.n}</div>` : '<span class="muted">–</span>'}</div></div>`).join('')}
+      <p class="help">"To headache end" = median time from the first dose of that treatment to the end of the headache.</p></section>`;
+  }
+  el.innerHTML = h;
+}
+
+function hourSVG(hours) {
+  const W = 336, H = 132, bw = W / 24, top = 16, ph = 90, mx = Math.max(1, ...hours);
+  let s = `<svg class="fit" viewBox="0 0 ${W} ${H}" role="img" aria-label="Headaches by hour of day">`;
+  hours.forEach((c, i) => {
+    const h = c / mx * ph;
+    s += `<rect x="${i * bw + 1}" y="${top + ph - h}" width="${bw - 2}" height="${Math.max(h, c ? 2 : 0)}" fill="#fff"><title>${pad(i)}:00 · ${c}</title></rect>`;
+    if (c) s += `<text x="${i * bw + bw / 2}" y="${top + ph - h - 4}" fill="#fff" font-size="9" text-anchor="middle">${c}</text>`;
+  });
+  s += `<line x1="0" x2="${W}" y1="${top + ph}" y2="${top + ph}" stroke="#555"/>`;
+  for (const i of [0, 6, 12, 18]) s += `<text x="${i * bw + 1}" y="${top + ph + 16}" fill="rgba(255,255,255,.68)" font-size="11">${pad(i)}h</text>`;
+  return s + '</svg>';
+}
+
+/* ---------------------------------------------------------------- views: attack */
+
+async function viewAttack(id) {
+  const [a, recent] = await Promise.all([api('/attacks/' + id), recentSince()]);
+  S.attack = a;
+  S.attacks[a.id] = a;
+  a.entries.forEach(e => { S.entries[e.id] = e; });
+  const running = !a.ended_at;
+  const pains = a.entries.filter(e => e.kind === 'pain');
+  const last = pains[pains.length - 1];
+  const peak = pains.length ? Math.max(...pains.map(e => e.kip)) : null;
+  const back = a.cycle_id ? '#/cycle/' + a.cycle_id : '#/loose';
+  const hd = a.hints.duration;
+  let h = pageHead(`Headache #${a.number}`, back, `<button class="btn sm ghost" data-act="editAttack" data-id="${a.id}">Edit</button>`);
+
+  if (!running && S.justEnded === a.id) {
+    h += endSummaryCard(a, peak);
+    S.justEnded = null;
+  }
+  h += `<div class="hero">`;
+  if (running) {
+    h += `<div class="small muted">IN PROGRESS · ${a.cycle_name ? esc(a.cycle_name) + ' · ' : ''}started ${hhmm(a.started_at)}</div>
+      <div class="num"><span class="ago" data-since="${a.started_at}">${fmtDur(minsSince(a.started_at))}</span></div>
+      ${hd.n >= 3 ? `<div class="small muted">your headaches usually last ~${fmtDur(hd.median)}${hd.p25 != null ? ` (${fmtDur(hd.p25)}–${fmtDur(hd.p75)})` : ''}</div>` : ''}`;
+  } else {
+    const span = dayDiff(a.started_at, a.ended_at);
+    h += `<div class="small muted">${dayLabel(a.started_at)} · ${hhmm(a.started_at)}–${hhmm(a.ended_at)}${span ? ` (+${span}d)` : ''}${a.cycle_name ? ' · ' + esc(a.cycle_name) : ''}</div>
+      <div class="num">${fmtDur(minsBetween(a.started_at, a.ended_at))}</div>`;
+  }
+  h += `<div class="stats"><div><span class="num">${last ? last.kip : '–'}</span><span class="small muted">KIP ${running ? 'now' : 'last'}</span></div>
+    <div><span class="num">${peak ?? '–'}</span><span class="small muted">peak</span></div></div></div>`;
+
+  const detail = [a.side && `${a.side} side`, a.locations.join(', '), a.pain_types.join(', ')].filter(Boolean).join(' · ');
+  h += `<button class="list-row" data-act="editAttack" data-id="${a.id}">
+    <span>${detail ? esc(detail) : '<span class="muted">Add side, location, pain type…</span>'}</span><span class="muted">Edit ›</span></button>`;
+  h += recentHTML(recent, a);
+  h += chartSVG(a, pains);
+  h += `<section><h2>Weather at start</h2>${a.weather
+    ? `<div><b>${esc(weatherBits(a.weather, a.prev_weather))}</b><div class="small muted">${a.weather.pressure_kpa != null ? `${a.weather.pressure_kpa.toFixed(2)} kPa · ` : ''}sea-level pressure${a.prev_weather ? ' · arrows vs. previous headache' : ''}<br>${esc(a.weather.place || '')} · ${a.weather.hour.slice(11)} · ${esc(a.weather.source)}</div></div>`
+    : `<p class="small muted">${S.settings.lat ? 'Fetching… (retried hourly if the server is offline)' : 'Set your location in Settings to record weather automatically.'}</p>`}</section>`;
+  h += `<section><h2>Timeline</h2>${journalHTML([a], a.entries, null, { asc: true, weeks: false, links: false })}</section>`;
+  app.innerHTML = h;
+
+  setBar(`<button class="btn primary grow" data-act="addEvent" data-attack="${a.id}">+ Add event</button>`
+    + (running ? `<button class="btn" data-act="endAttack" data-id="${a.id}">End headache</button>` : ''));
+}
+
+function endSummaryCard(a, peak) {
+  const firsts = {};
+  for (const e of a.entries) if (e.kind === 'treatment' && !(e.treatment_id in firsts)) firsts[e.treatment_id] = e;
+  const lines = Object.values(firsts).map(e => `${esc(e.title)} → over ${fmtDur(minsBetween(e.at, a.ended_at))} after first dose`);
+  return `<div class="card solid" style="margin-top:16px"><div class="card-title">Headache over</div>
+    <div class="num" style="margin:8px 0">${fmtDur(minsBetween(a.started_at, a.ended_at))}</div>
+    <div class="small">${peak != null ? `peak KIP ${peak}` : ''}${lines.length ? '<br>' + lines.join('<br>') : ''}</div>
+    <p class="small muted">Logged. Details can wait for the cold light of morning — rest now.</p></div>`;
+}
+
+/** Side / location / pain-type fields, shared by the start and edit sheets. */
+function headacheDetailFields(a) {
+  return `<label class="f">Side</label><div class="chips">${radios('side', [['', '—'], ...SIDES.map(s => [s, s])], a.side || '')}</div>
+    <label class="f">Location <span class="muted">(pick any)</span></label>
+    <div class="chips">${checks('locations', union(S.settings.pain_locations, a.locations), a.locations)}</div>
+    <label class="f">Pain type <span class="muted">(pick any)</span></label>
+    <div class="chips">${checks('pain_types', union(S.settings.pain_types, a.pain_types), a.pain_types)}</div>
+    <input name="custom_type" placeholder="+ add your own pain type" autocomplete="off">`;
+}
+
+/** Selected pain types plus a typed-in one (which is also saved to the option list). */
+async function painTypesWithCustom(f) {
+  const v = (f.custom_type || '').trim();
+  if (!v) return f.pain_types || [];
+  S.settings = await api('/settings', { method: 'PUT', body: { pain_types: union(S.settings.pain_types, [v]) } });
+  return union(f.pain_types, [v]);
+}
+
+/** Pain curve for one attack: step line of KIP over time, dashed lines at doses. */
+function chartSVG(a, pains) {
+  if (!pains.length) return '';
+  const W = 336, H = 156, L = 24, R = 8, T = 12, B = 28, pw = W - L - R, ph = H - T - B;
+  const end = a.ended_at || nowLocal();
+  const total = Math.max(10, minsBetween(a.started_at, end > pains[pains.length - 1].at ? end : pains[pains.length - 1].at));
+  const x = at => L + Math.min(1, Math.max(0, minsBetween(a.started_at, at) / total)) * pw;
+  const y = k => T + ph - k / 10 * ph;
+  let s = `<section><h2>Pain curve</h2><svg class="fit" viewBox="0 0 ${W} ${H}" role="img" aria-label="Pain over time">`;
+  for (const k of [0, 5, 10]) s += `<line x1="${L}" x2="${W - R}" y1="${y(k)}" y2="${y(k)}" stroke="#333"/><text x="${L - 6}" y="${y(k) + 4}" fill="rgba(255,255,255,.68)" font-size="11" text-anchor="end">${k}</text>`;
+  for (const e of a.entries.filter(e => e.kind === 'treatment')) {
+    s += `<line x1="${x(e.at)}" x2="${x(e.at)}" y1="${T}" y2="${T + ph}" stroke="#fff" stroke-dasharray="3 3" opacity=".6"><title>${esc(e.title)} ${hhmm(e.at)}</title></line>`;
+    s += `<path d="M${x(e.at)} ${T + ph - 5}l5 5-5 5-5-5z" fill="#000" stroke="#fff"/>`;
+  }
+  let d = `M${x(pains[0].at)} ${y(pains[0].kip)}`;
+  for (const p of pains.slice(1)) d += ` H${x(p.at)} V${y(p.kip)}`;
+  d += ` H${x(end)}`;
+  s += `<path d="${d}" fill="none" stroke="#fff" stroke-width="2.5"/>`;
+  for (const p of pains) s += `<circle cx="${x(p.at)}" cy="${y(p.kip)}" r="4" fill="#fff"><title>${hhmm(p.at)} KIP ${p.kip}</title></circle>`;
+  s += `<text x="${L}" y="${H - 8}" fill="rgba(255,255,255,.68)" font-size="11">${hhmm(a.started_at)}</text>
+    <text x="${W - R}" y="${H - 8}" fill="rgba(255,255,255,.68)" font-size="11" text-anchor="end">${a.ended_at ? hhmm(a.ended_at) : 'now'} · ${fmtDur(total)}</text>`;
+  return s + '</svg></section>';
+}
+
+/** Phase for a KIP logged with "Auto" selected. */
+function autoPhase(a, kip) {
+  const pains = a.entries.filter(e => e.kind === 'pain');
+  const last = pains[pains.length - 1];
+  if (!last) return kip >= 4 ? 'onset' : 'shadow';
+  if (kip > last.kip) return last.phase === 'shadow' ? 'onset' : 'build';
+  if (kip < last.kip) return 'subside';
+  return last.phase || 'build';
+}
+
+/* ---------------------------------------------------------------- views: learnings */
+
+async function viewLearnings() {
+  const list = await api('/learnings');
+  let h = pageHead('Cycle learnings', '#/');
+  h += `<p class="muted">One note per cycle, written at the end — what past you wants future you to remember.</p>`;
+  h += list.length ? list.map(learningCard).join('')
+    : `<div class="empty"><p>No learnings yet. When you end a cycle, you'll be asked for one.</p></div>`;
+  app.innerHTML = h;
+}
+const learningCard = c => `<div class="card"><div class="card-title"><a href="#/cycle/${c.id}">${esc(c.name)}</a>
+  <span class="small muted">${fmtDate(c.started_on)}${c.ended_on ? ' – ' + fmtDate(c.ended_on) : ''}</span></div>
+  <div style="white-space:pre-wrap;margin-top:8px">${esc(c.learnings)}</div></div>`;
+
+/* ---------------------------------------------------------------- views: treatments */
+
+async function viewTreatments() {
+  await loadTreatments();
+  let h = pageHead('Meds & treatments', '#/', `<button class="btn sm" data-act="editTreatment">+ Add</button>`);
+  h += `<p class="muted">Define each med or treatment once with its unit of measure. <b>Quick</b> ones are listed first under Add event → Medication, where one tap logs them.</p>`;
+  for (const [cat, label] of CATS) {
+    const list = S.treatments.filter(t => t.category === cat && !t.archived);
+    if (!list.length) continue;
+    h += `<section><h2>${label}</h2>${list.map(treatmentRow).join('')}</section>`;
+  }
+  const arch = S.treatments.filter(t => t.archived);
+  if (arch.length) h += `<section><h2>Archived</h2>${arch.map(treatmentRow).join('')}</section>`;
+  app.innerHTML = h;
+  setBar(`<button class="btn primary" data-act="editTreatment">+ Add treatment</button>`);
+}
+const treatmentRow = t => `<button class="list-row" data-act="editTreatment" data-id="${t.id}">
+  <span><b>${esc(t.name)}</b><span class="small muted" style="display:block">${t.uom ? 'unit: ' + esc(t.uom) : 'no unit'}${t.default_amount ? ' · default ' + esc(doseLabel(t, t.default_amount)) : ''}</span></span>
+  <span class="small">${t.quick ? '<span class="pill">QUICK</span>' : ''}</span></button>`;
+
+/* ---------------------------------------------------------------- views: export */
+
+async function viewExport() {
+  const cycles = await api('/cycles?today=' + today());
+  const open = cycles.find(c => !c.ended_on);
+  const st = S.settings;
+  let h = pageHead('Report', '#/');
+  h += `<form id="exp" class="pad" novalidate>
+    <h2>Date range</h2>
+    <div class="chips">
+      ${open ? `<button type="button" class="chip" data-act="preset" data-start="${open.started_on}">This cycle</button>` : ''}
+      <button type="button" class="chip" data-act="preset" data-days="7">7 days</button>
+      <button type="button" class="chip" data-act="preset" data-days="30">30 days</button>
+      <button type="button" class="chip" data-act="preset" data-days="90">90 days</button>
+    </div>
+    <div class="row"><div><label class="f">From</label><input type="date" name="start" value="${open ? open.started_on : addDays(today(), -29)}"></div>
+      <div><label class="f">To</label><input type="date" name="end" value="${today()}"></div></div>
+    <label class="f">Include</label>
+    <select name="cycle_id"><option value="all">Everything in the date range</option>
+      ${cycles.map(c => `<option value="${c.id}">Only cycle: ${esc(c.name)}</option>`).join('')}
+      <option value="none">Only entries outside a cycle</option></select>
+
+    <section><h2>Email</h2>
+      <label class="f">To</label><input type="email" name="to" value="${esc(st.recipient)}" placeholder="neurologist@example.com" autocomplete="email">
+      <label class="f">Message <span class="muted">(optional)</span></label>
+      <textarea name="message" placeholder="Hi Dr. …, here's my log since my last appointment.">${st.neurologist_name ? `Hi ${esc(st.neurologist_name)},\n\nHere is my cluster headache log for this period.\n\n${esc(st.patient_name)}` : ''}</textarea>
+      <div class="check"><input type="checkbox" name="cc_self" data-bool checked id="cc"><label for="cc">Send me a copy</label></div>
+      <button type="button" class="btn primary wide" data-act="emailReport"${st.smtp_host ? '' : ' disabled'}>Email report</button>
+      ${st.smtp_host ? '<p class="help">Sends a text + HTML summary with the printable report and a CSV attached.</p>'
+        : '<p class="help">Email isn\'t set up yet — add SMTP details in <a href="#/settings">Settings</a>, or use "Open in mail app" below.</p>'}
+    </section>
+    <section><h2>Other ways</h2><div class="stack">
+      <button type="button" class="btn wide" data-act="openReport" data-fmt="html">Open printable report</button>
+      <div class="row"><button type="button" class="btn" data-act="openReport" data-fmt="csv" data-dl="1">CSV</button>
+        <button type="button" class="btn" data-act="openReport" data-fmt="text" data-dl="1">Text file</button></div>
+      <div class="row"><button type="button" class="btn" data-act="copyReport">Copy text</button>
+        <button type="button" class="btn" data-act="mailtoReport">Open in mail app</button></div>
+    </div><p class="help">The printable report includes the daily chart. On a phone: open it, then Share → Print → pinch out to save a PDF.</p></section>
+    <section><h2>Preview</h2><pre class="preview" id="preview">Loading…</pre></section>
+  </form>`;
+  app.innerHTML = h;
+  $('#exp').addEventListener('change', updatePreview);
+  updatePreview();
+}
+
+function exportParams() {
+  const f = formValues($('#exp'));
+  if (!f.start || !f.end) throw new Error('Pick a start and end date');
+  return f;
+}
+const reportQuery = (f, fmt) => `/report?start=${f.start}&end=${f.end}&cycle_id=${encodeURIComponent(f.cycle_id)}&format=${fmt}`;
+async function updatePreview() {
+  const pre = $('#preview');
+  try { pre.textContent = await api(reportQuery(exportParams(), 'text')); } catch (e) { pre.textContent = e.message; }
+}
+
+/* ---------------------------------------------------------------- views: settings */
+
+async function viewSettings() {
+  await loadSettings();
+  const [cycles, backups] = await Promise.all([api('/cycles?today=' + today()), api('/backups')]);
+  const s = S.settings;
+  let h = pageHead('Settings', '#/');
+  h += `<form id="settings" novalidate>
+    <section><h2>You &amp; your neurologist</h2>
+      <label class="f">Your name <span class="muted">(shown on reports)</span></label><input name="patient_name" value="${esc(s.patient_name)}" autocomplete="name">
+      <label class="f">Neurologist's name</label><input name="neurologist_name" value="${esc(s.neurologist_name)}" placeholder="Dr. …">
+      <label class="f">Neurologist's email</label><input type="email" name="recipient" value="${esc(s.recipient)}" autocomplete="off">
+    </section>
+    <section><h2>Weather location</h2>
+      <p class="help" style="margin-top:0">Weather (°C, humidity %, pressure cmHg) is recorded automatically for each headache from Open-Meteo. ${s.place ? `Currently: <b>${esc(s.place)}</b>` : 'No location set.'}</p>
+      <div class="row"><input name="geo" placeholder="City, e.g. Edmonton"><button type="button" class="btn" data-act="geocode" style="flex:0 0 auto">Find</button></div>
+      <div id="georesults"></div>
+      <div class="row"><div><label class="f">Latitude</label><input name="lat" value="${esc(s.lat)}" inputmode="decimal"></div>
+        <div><label class="f">Longitude</label><input name="lon" value="${esc(s.lon)}" inputmode="decimal"></div></div>
+      <input type="hidden" name="place" value="${esc(s.place)}">
+    </section>
+    <section><h2>Pain options</h2>
+      <label class="f">Locations <span class="muted">(one per line)</span></label><textarea name="pain_locations" rows="6">${esc(s.pain_locations.join('\n'))}</textarea>
+      <label class="f">Pain types <span class="muted">(one per line)</span></label><textarea name="pain_types" rows="6">${esc(s.pain_types.join('\n'))}</textarea>
+    </section>
+    <section><h2>Email (SMTP)</h2>
+      <p class="help" style="margin-top:0">For Gmail: host <b>smtp.gmail.com</b>, port <b>587</b>, STARTTLS, your Gmail address as username, and an <b>App Password</b> (Google Account → Security → App passwords).</p>
+      <label class="f">SMTP host</label><input name="smtp_host" value="${esc(s.smtp_host)}" placeholder="smtp.gmail.com" autocapitalize="off">
+      <div class="row"><div><label class="f">Port</label><input name="smtp_port" value="${esc(s.smtp_port)}" inputmode="numeric"></div>
+        <div><label class="f">Security</label><select name="smtp_security">${[['starttls', 'STARTTLS'], ['ssl', 'SSL/TLS'], ['none', 'None']].map(([v, l]) => `<option value="${v}"${s.smtp_security === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div></div>
+      <label class="f">Username</label><input name="smtp_user" value="${esc(s.smtp_user)}" autocapitalize="off" autocomplete="off">
+      <label class="f">Password</label><input type="password" name="smtp_password" placeholder="${s.has_password ? '•••••• saved — leave blank to keep' : ''}" autocomplete="new-password">
+      <label class="f">From address</label><input type="email" name="smtp_from" value="${esc(s.smtp_from)}" placeholder="defaults to username">
+      <button type="button" class="btn wide" data-act="testEmail" style="margin-top:16px">Send test email to me</button>
+    </section>
+  </form>
+  <section><h2>Backup &amp; move to another server</h2>
+    <p class="help" style="margin-top:0">An automatic backup is made daily (last 30 kept, ${backups.length} on file). The JSON file below contains everything except your SMTP password.</p>
+    <div class="stack"><a class="btn wide" href="/api/backup" download>Download full backup (JSON)</a>
+      <button class="btn wide ghost" data-act="backupNow">Make a server backup now</button>
+      <label class="btn wide ghost" for="restorefile">Restore from a JSON backup…</label>
+      <input type="file" id="restorefile" accept="application/json,.json" class="hide"></div>
+  </section>
+  <section><h2>Import an old text log</h2>
+    <p class="help" style="margin-top:0">Paste notes like your Evernote/Docs logs — day headers (<b>Feb 7</b>) followed by lines like <b>0042 - start oxygen, kip 6</b>. Each line becomes a note; lines mentioning "kip N" become pain points. Afterwards, create headaches with a start and end time and the entries inside are grouped into them automatically.</p>
+    <form id="importf" novalidate>
+      <textarea name="text" rows="8" placeholder="Feb 7&#10;0035 - woken up&#10;0042 - start oxygen, kip 6"></textarea>
+      <div class="row"><div><label class="f">Year of first day</label><input name="year" inputmode="numeric" value="${new Date().getFullYear()}"></div>
+        <div><label class="f">Into cycle</label><select name="cycle_id"><option value="">Outside a cycle</option>${cycles.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div></div>
+      <div class="row" style="margin-top:16px"><button type="button" class="btn" data-act="importLog" data-dry="1">Preview</button><button type="button" class="btn primary" data-act="importLog">Import</button></div>
+      <pre class="preview hide" id="importpreview"></pre>
+    </form>
+  </section>
+  <p class="small muted pad">ClusterLog ${esc((await api('/health')).version)} · data lives in a single SQLite file on the server.</p>`;
+  app.innerHTML = h;
+  setBar(`<button class="btn primary" data-act="saveSettings">Save settings</button>`);
+  $('#restorefile').addEventListener('change', restoreBackup);
+}
+
+async function restoreBackup(ev) {
+  const file = ev.target.files[0];
+  if (!file) return;
+  if (!confirm(`Replace ALL current data with the contents of ${file.name}? A safety backup of the current data is made first.`)) return;
+  try {
+    const r = await api('/restore', { method: 'POST', body: await file.text() });
+    await Promise.all([loadTreatments(), loadSettings()]);
+    toast(`Restored: ${r.counts.cycles} cycles, ${r.counts.attacks} headaches, ${r.counts.entries} entries`);
+    refresh();
+  } catch (e) { toast(e.message); }
+}
+
+/* ---------------------------------------------------------------- sheets */
+
+function cycleSheet(c = null) {
+  openSheet(c ? 'Edit cycle' : 'New cycle', `
+    <label class="f">Name</label><input name="name" value="${esc(c?.name || '')}" placeholder="e.g. Fall ${new Date().getFullYear()}" required>
+    <label class="f">Started on</label><input type="date" name="started_on" value="${c?.started_on || today()}">
+    <label class="f">Ended on <span class="muted">(leave blank while active)</span></label>
+    <input type="date" name="ended_on" value="${c?.ended_on || ''}">
+    <label class="f">Notes</label><textarea name="notes" rows="3">${esc(c?.notes || '')}</textarea>
+    ${c?.ended_on || c?.learnings ? `<label class="f">Cycle learnings</label><textarea name="learnings" rows="6">${esc(c?.learnings || '')}</textarea>` : ''}`, {
+    submitLabel: c ? 'Save' : 'Create cycle',
+    extra: c ? `${c.ended_on ? '' : `<button type="button" class="btn" data-act="endCycle" data-id="${c.id}">End cycle</button>`}
+      <button type="button" class="btn ghost danger" data-act="deleteCycle" data-id="${c.id}">Delete</button>` : '',
+    onSubmit: async f => {
+      const body = { name: f.name, started_on: f.started_on, ended_on: f.ended_on || null, notes: f.notes,
+        learnings: f.learnings ?? c?.learnings ?? '' };
+      if (c) {
+        const saved = await api('/cycles/' + c.id, { method: 'PUT', body });
+        if (saved.ended_on && !c.ended_on && !saved.learnings) setTimeout(() => learningsSheet(saved, true), 50);
+      } else {
+        const nc = await api('/cycles', { method: 'POST', body });
+        location.hash = '#/cycle/' + nc.id;
+        const past = await api('/learnings');
+        if (past.length) setTimeout(() => pastLearningsSheet(past), 50);
+      }
+    },
+  });
+}
+
+function learningsSheet(c, ending = false) {
+  openSheet('Cycle learnings', `
+    <p class="muted">${ending ? `${esc(c.name)} is over. ` : ''}What did this cycle teach you? What actually mattered, what worked, what to do sooner next time? Future you will see this when the next cycle starts.</p>
+    <textarea name="learnings" rows="10" placeholder="e.g. Start verapamil the first week, not week 3. Oxygen at 15 L/min wasn't enough — 25 L/min aborts in ~10 min. Book the nerve block early.">${esc(c.learnings || '')}</textarea>`, {
+    submitLabel: 'Save learnings',
+    onSubmit: f => api('/cycles/' + c.id, { method: 'PUT', body: { ...c, learnings: f.learnings } }),
+  });
+}
+
+function pastLearningsSheet(list) {
+  openSheet('From past you', `<p class="muted">New cycle started. Here's what you wrote at the end of previous cycles:</p>
+    ${list.map(learningCard).join('')}`, { submitLabel: 'Got it', onSubmit: () => {} });
+}
+
+async function startAttackSheet(cycleId) {
+  const last = await api('/attacks/last-details');
+  let side = last.side || '';
+  try { side = localStorage.getItem('lastSide') ?? side; } catch { /* private mode */ }
+  openSheet('Start headache', `
+    <label class="f">Started at</label><input type="datetime-local" name="started_at" value="${nowLocal()}">
+    <label class="f">How did it start?</label><div class="chips">${radios('phase', [['shadow', 'Shadows'], ['onset', 'Pain onset']], 'shadow')}</div>
+    <label class="f">Pain level (KIP) <span class="muted">— optional</span></label>${kipRadios(null)}
+    ${headacheDetailFields({ side, locations: [], pain_types: [] })}
+    <label class="f">Note <span class="muted">(optional)</span></label><input name="note" placeholder="e.g. woken up">
+    <details class="more"><summary>Logging a past headache?</summary>
+      <label class="f">Ended at</label><input type="datetime-local" name="ended_at"></details>`, {
+    submitLabel: 'Start headache',
+    onSubmit: async f => {
+      try { localStorage.setItem('lastSide', f.side || ''); } catch { /* private mode */ }
+      const a = await api('/attacks', { method: 'POST', body: {
+        cycle_id: cycleId ? +cycleId : null, started_at: f.started_at, ended_at: f.ended_at || null,
+        kip: f.kip == null ? null : +f.kip, phase: f.phase || 'shadow', note: f.note,
+        side: f.side || '', locations: f.locations || [], pain_types: await painTypesWithCustom(f) } });
+      location.hash = '#/attack/' + a.id;
+    },
+  });
+}
+
+/** "Add event" chooser: pain level (inside a headache), medication, note. */
+function addEventSheet(d) {
+  const ctx = d.attack ? `data-attack="${d.attack}"` : `data-cycle="${d.cycle || ''}"`;
+  const choice = (act, title, sub) => `<button type="button" class="btn wide big choice" data-act="${act}" ${ctx}>${title}<span class="small">${sub}</span></button>`;
+  openSheet('Add event', `<div class="stack" style="margin-top:16px">
+    ${d.attack ? choice('addPain', 'Pain level', 'KIP 0–10 · shadows, building, peak, subsiding') : ''}
+    ${choice('addTreatment', 'Medication / treatment', 'oxygen, Zomig, cold compress, injection…')}
+    ${choice('addNote', 'Note', 'anything, with a timestamp')}</div>`);
+}
+
+const undoToast = (msg, e, edit) => toast(msg, [
+  { label: 'Undo', fn: async () => { await api('/entries/' + e.id, { method: 'DELETE' }); refresh(); } },
+  { label: 'Edit', fn: () => edit(e) }]);
+
+function treatmentSheet({ cycle = null, attack = null, entry = null } = {}) {
+  const cur = entry ? (entry.kind === 'event' ? '' : entry.treatment_id) : null;
+  const groups = CATS.map(([cat, label]) => {
+    const list = S.treatments.filter(t => t.category === cat && (!t.archived || t.id === cur));
+    return list.length ? `<div class="small muted" style="margin:16px 0 8px">${label}</div><div class="chips" style="margin:0">
+      ${list.map(t => opt('radio', 'treatment_id', t.id, t.name, t.id === cur)).join('')}</div>` : '';
+  }).join('');
+  const isEvent = entry?.kind === 'event';
+  const atDefault = entry ? entry.at : nowLocal();
+  const quick = entry ? [] : activeTreatments().filter(t => t.quick);
+  openSheet(entry ? (isEvent ? 'Edit event' : 'Edit dose') : 'Medication / treatment', `
+    <label class="f">When</label><input type="datetime-local" name="at" value="${atDefault}">
+    ${quick.length ? `<label class="f">Tap to log</label><div class="stack">${quick.map(t =>
+      `<button type="submit" class="btn wide" name="quick" value="${t.id}">${esc(doseLabel(t, t.default_amount))}</button>`).join('')}</div>
+      <label class="f" style="margin-top:32px">Or pick one and set the dose</label>` : ''}
+    ${groups}
+    <div class="chips" style="margin-top:16px">${opt('radio', 'treatment_id', '', 'Other / custom event…', isEvent)}</div>
+    <div id="amountwrap"><label class="f">Amount <span class="muted" id="uomlbl"></span></label><input name="amount" value="${esc(entry?.amount || '')}" autocomplete="off"></div>
+    <div id="titlewrap"><label class="f">Event name</label><input name="title" value="${esc(isEvent ? entry.title : '')}" placeholder="e.g. Neurologist visit, steroid taper start"></div>
+    <label class="f">Notes <span class="muted">(optional)</span></label><textarea name="note" rows="3">${esc(entry?.note || '')}</textarea>
+    <p class="help" id="preview"></p>`, {
+    submitLabel: entry ? 'Save' : 'Log it',
+    extra: entry ? `<button type="button" class="btn ghost danger" data-act="deleteEntry" data-id="${entry.id}">Delete</button>` : '',
+    onOpen: form => {
+      const sync = (fill) => {
+        const tid = form.querySelector('input[name=treatment_id]:checked')?.value;
+        const t = tid ? treatment(tid) : null;
+        $('#amountwrap', form).classList.toggle('hide', !t);
+        $('#titlewrap', form).classList.toggle('hide', !(tid === ''));
+        $('#uomlbl', form).textContent = t?.uom ? `(${t.uom})` : '';
+        if (fill && t) form.amount.value = t.default_amount;
+        $('#preview', form).textContent = t ? 'Logs as: ' + doseLabel(t, form.amount.value) : '';
+      };
+      form.addEventListener('change', ev => sync(ev.target.name === 'treatment_id'));
+      form.amount.addEventListener('input', () => sync(false));
+      sync(false);
+    },
+    onSubmit: async f => {
+      let body;
+      if (f.quick) body = { kind: 'treatment', treatment_id: +f.quick, amount: treatment(f.quick).default_amount, note: f.note };
+      else if (f.treatment_id == null) throw new Error('Pick a treatment, or "Other / custom event"');
+      else body = f.treatment_id
+        ? { kind: 'treatment', treatment_id: +f.treatment_id, amount: f.amount, note: f.note }
+        : { kind: 'event', title: f.title, note: f.note };
+      Object.assign(body, { at: f.at,
+        attack_id: entry ? entry.attack_id : (attack ? +attack : null),
+        cycle_id: entry ? entry.cycle_id : (cycle ? +cycle : null) });
+      const e = await api(entry ? '/entries/' + entry.id : '/entries', { method: entry ? 'PUT' : 'POST', body });
+      if (entry) toast('Saved');
+      else undoToast(`${e.title} · ${hhmm(e.at)}`, e, x => treatmentSheet({ entry: x }));
+    },
+  });
+}
+
+function noteSheet({ cycle = null, attack = null, entry = null } = {}) {
+  openSheet(entry ? 'Edit note' : 'Note', `
+    <label class="f">When</label><input type="datetime-local" name="at" value="${entry ? entry.at : nowLocal()}">
+    <label class="f">Note</label><textarea name="note" rows="6" placeholder="Anything — what you're feeling, what you tried…">${esc(entry?.note || '')}</textarea>`, {
+    submitLabel: entry ? 'Save' : 'Add note',
+    extra: entry ? `<button type="button" class="btn ghost danger" data-act="deleteEntry" data-id="${entry.id}">Delete</button>` : '',
+    onOpen: form => setTimeout(() => form.note.focus(), 200),
+    onSubmit: f => api(entry ? '/entries/' + entry.id : '/entries', { method: entry ? 'PUT' : 'POST', body: {
+      kind: 'note', at: f.at, note: f.note,
+      attack_id: entry ? entry.attack_id : (attack ? +attack : null),
+      cycle_id: entry ? entry.cycle_id : (cycle ? +cycle : null) } }),
+  });
+}
+
+function painSheet({ attack = null, entry = null } = {}) {
+  if (entry) {
+    openSheet('Edit pain level', `
+      <label class="f">When</label><input type="datetime-local" name="at" value="${entry.at}">
+      <label class="f">KIP</label>${kipRadios(entry.kip)}
+      <label class="f">Phase</label><div class="chips">${radios('phase', [['', '—'], ...PHASES], entry.phase || '')}</div>
+      <label class="f">Note <span class="muted">(optional)</span></label><input name="note" value="${esc(entry.note || '')}">`, {
+      extra: `<button type="button" class="btn ghost danger" data-act="deleteEntry" data-id="${entry.id}">Delete</button>`,
+      onSubmit: f => {
+        if (f.kip == null) throw new Error('Pick a KIP level');
+        return api('/entries/' + entry.id, { method: 'PUT', body: { ...entry, at: f.at, kip: +f.kip, phase: f.phase || null, note: f.note } });
+      },
+    });
+    return;
+  }
+  const a = S.attack;
+  openSheet('Pain level', `
+    <label class="f">When</label><input type="datetime-local" name="at" value="${a.ended_at ? a.started_at : nowLocal()}">
+    <label class="f">Phase</label><div class="chips">${radios('phase', [['auto', 'Auto'], ...PHASES], 'auto')}</div>
+    <label class="f">Note <span class="muted">(optional)</span></label><input name="note" autocomplete="off">
+    <label class="f">Tap the KIP to log it</label>
+    <div class="kip-grid">${[...Array(11).keys()].map(i => `<button type="submit" class="btn" name="kip" value="${i}">${i}</button>`).join('')}</div>`, {
+    submitLabel: null,
+    onSubmit: async f => {
+      const kip = +f.kip;
+      const auto = f.phase === 'auto';
+      const phase = auto ? autoPhase(a, kip) : f.phase;
+      const e = await api('/entries', { method: 'POST', body: { kind: 'pain', at: f.at, attack_id: +attack || a.id, kip, phase, note: f.note } });
+      // the first drop after the climb marks the highest point as the peak
+      if (auto && phase === 'subside' && !a.entries.some(x => x.phase === 'peak')) {
+        const hi = a.entries.filter(x => x.kind === 'pain').reduce((m, x) => (x.kip >= (m?.kip ?? -1) ? x : m), null);
+        if (hi) await api('/entries/' + hi.id, { method: 'PUT', body: { ...hi, phase: 'peak' } });
+      }
+      undoToast(`KIP ${kip} · ${PHASE_LABEL[phase]} · ${hhmm(e.at)}`, e, x => painSheet({ entry: x }));
+    },
+  });
+}
+
+async function attackSheet(a) {
+  const cycles = await api('/cycles?today=' + today());
+  openSheet(`Edit headache #${a.number}`, `
+    <label class="f">Started</label><input type="datetime-local" name="started_at" value="${a.started_at}">
+    <label class="f">Ended <span class="muted">(blank = still going)</span></label><input type="datetime-local" name="ended_at" value="${a.ended_at || ''}">
+    ${headacheDetailFields(a)}
+    <label class="f">Cycle</label><select name="cycle_id"><option value="">Outside a cycle</option>
+      ${cycles.map(c => `<option value="${c.id}"${c.id === a.cycle_id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+    <label class="f">Notes</label><textarea name="notes" rows="4">${esc(a.notes || '')}</textarea>
+    <p class="help">Weather is recorded automatically and can't be edited.</p>`, {
+    extra: `<button type="button" class="btn ghost danger" data-act="deleteAttack" data-id="${a.id}">Delete</button>`,
+    onSubmit: async f => api('/attacks/' + a.id, { method: 'PATCH', body: {
+      started_at: f.started_at, ended_at: f.ended_at || null, cycle_id: f.cycle_id ? +f.cycle_id : null, notes: f.notes,
+      side: f.side || '', locations: f.locations || [], pain_types: await painTypesWithCustom(f) } }),
+  });
+}
+
+function endAttackSheet(a) {
+  openSheet('End headache', `
+    <label class="f">Ended at</label><input type="datetime-local" name="ended_at" value="${nowLocal()}">
+    <label class="f">Note <span class="muted">(optional)</span></label><input name="note" placeholder="e.g. pain gone, back to bed">`, {
+    submitLabel: 'End headache',
+    onSubmit: async f => {
+      await api(`/attacks/${a.id}/end`, { method: 'POST', body: f });
+      S.justEnded = a.id;
+    },
+  });
+}
+
+function treatmentEditSheet(t = null) {
+  openSheet(t ? 'Edit treatment' : 'New treatment', `
+    <label class="f">Name</label><input name="name" value="${esc(t?.name || '')}" placeholder="e.g. Zomig nasal spray">
+    <label class="f">Category</label><div class="chips">${radios('category', CATS, t?.category || 'abortive')}</div>
+    <div class="row"><div><label class="f">Default amount</label><input name="default_amount" value="${esc(t?.default_amount || '')}" placeholder="5"></div>
+      <div><label class="f">Unit</label><input name="uom" value="${esc(t?.uom || '')}" placeholder="mg, L/min, level"></div></div>
+    <div class="check"><input type="checkbox" id="pfx" name="uom_prefix" data-bool${t?.uom_prefix ? ' checked' : ''}><label for="pfx">Unit goes before the amount (e.g. "level 3")</label></div>
+    <div class="check"><input type="checkbox" id="qk" name="quick" data-bool${t?.quick ? ' checked' : ''}><label for="qk">Quick: listed first under Medication, one tap logs it</label></div>
+    ${t ? `<div class="check"><input type="checkbox" id="ar" name="archived" data-bool${t.archived ? ' checked' : ''}><label for="ar">Archived (hidden from pickers)</label></div>` : ''}
+    <label class="f">Sort order <span class="muted">(lower = first)</span></label><input name="sort" inputmode="numeric" value="${t?.sort ?? 100}">
+    <p class="help" id="tpreview"></p>`, {
+    submitLabel: t ? 'Save' : 'Add',
+    extra: t ? `<button type="button" class="btn ghost danger" data-act="deleteTreatment" data-id="${t.id}">Delete</button>` : '',
+    onOpen: form => {
+      const sync = () => {
+        const f = formValues(form);
+        $('#tpreview', form).textContent = f.name ? 'Logs as: ' + doseLabel({ name: f.name, uom: f.uom, uom_prefix: f.uom_prefix }, f.default_amount) : '';
+      };
+      form.addEventListener('input', sync); form.addEventListener('change', sync); sync();
+    },
+    onSubmit: async f => {
+      const body = { ...f, sort: parseInt(f.sort, 10) || 0, archived: !!f.archived };
+      await api(t ? '/treatments/' + t.id : '/treatments', { method: t ? 'PUT' : 'POST', body });
+      await loadTreatments();
+    },
+  });
+}
+
+/* ---------------------------------------------------------------- actions */
+
+const ACT = {
+  closeSheet: () => closeSheet(),
+  newCycle: () => cycleSheet(),
+  editCycle: async d => cycleSheet(await api('/cycles/' + d.id)),
+  endCycle: async d => {
+    const c = await api('/cycles/' + d.id);
+    const saved = await api('/cycles/' + d.id, { method: 'PUT', body: { ...c, ended_on: today() } });
+    closeSheet(); await refresh();
+    learningsSheet(saved, true);
+  },
+  deleteCycle: async d => {
+    if (!confirm('Delete this cycle? Its headaches and entries are kept and moved to "Outside a cycle".')) return;
+    await api('/cycles/' + d.id, { method: 'DELETE' }); closeSheet(); location.hash = '#/';
+  },
+  editLearnings: async d => learningsSheet(await api('/cycles/' + d.id), false),
+  tab: d => { S.tab = d.v; refresh(); },
+  meds: d => { S.meds = d.v; refresh(); },
+  startAttack: d => startAttackSheet(d.cycle),
+  addTreatment: d => treatmentSheet({ cycle: d.cycle || null, attack: d.attack || null }),
+  addNote: d => noteSheet({ cycle: d.cycle || null, attack: d.attack || null }),
+  addPain: d => painSheet({ attack: d.attack }),
+  editEntry: d => {
+    const e = S.entries[d.id];
+    if (!e) return;
+    if (e.kind === 'pain') painSheet({ entry: e });
+    else if (e.kind === 'note') noteSheet({ entry: e });
+    else treatmentSheet({ entry: e });
+  },
+  deleteEntry: async d => {
+    if (!confirm('Delete this entry?')) return;
+    await api('/entries/' + d.id, { method: 'DELETE' }); closeSheet(); refresh();
+  },
+  editAttack: d => attackSheet(S.attacks[d.id] || S.attack),
+  deleteAttack: async d => {
+    if (!confirm('Delete this headache and everything logged inside it?')) return;
+    const a = S.attacks[d.id] || S.attack;
+    await api('/attacks/' + d.id, { method: 'DELETE' }); closeSheet();
+    location.hash = a && a.cycle_id ? '#/cycle/' + a.cycle_id : '#/loose';
+  },
+  endAttack: () => endAttackSheet(S.attack),
+  addEvent: d => addEventSheet(d),
+  editTreatment: d => treatmentEditSheet(d.id ? treatment(d.id) : null),
+  deleteTreatment: async d => {
+    if (!confirm('Delete this treatment? If it has been used it will be archived instead, so your history stays intact.')) return;
+    const r = await api('/treatments/' + d.id, { method: 'DELETE' });
+    await loadTreatments(); closeSheet(); toast(r.archived ? 'Archived (it is used in your log)' : 'Deleted'); refresh();
+  },
+  preset: (d) => {
+    const f = $('#exp');
+    f.start.value = d.start || addDays(today(), -(+d.days - 1));
+    f.end.value = today();
+    updatePreview();
+  },
+  openReport: d => {
+    const f = exportParams();
+    window.open('/api' + reportQuery(f, d.fmt) + (d.dl ? '&download=true' : ''), '_blank');
+  },
+  copyReport: async () => {
+    const t = await api(reportQuery(exportParams(), 'text'));
+    toast((await copyText(t)) ? 'Report copied — paste it into an email' : 'Copy failed — select the preview text instead');
+  },
+  mailtoReport: async () => {
+    const f = exportParams();
+    const t = await api(reportQuery(f, 'text'));
+    const body = (f.message ? f.message + '\n\n' : '') + t;
+    location.href = `mailto:${(f.to || '').trim()}?subject=${encodeURIComponent(`Cluster headache log ${f.start} to ${f.end}`)}&body=${encodeURIComponent(body)}`;
+  },
+  emailReport: async (d, el) => {
+    const f = exportParams();
+    el.disabled = true; el.textContent = 'Sending…';
+    try {
+      const r = await api('/report/email', { method: 'POST', body: { start: f.start, end: f.end, cycle_id: f.cycle_id, to: f.to, message: f.message, cc_self: f.cc_self } });
+      toast('Sent to ' + r.to.join(', '));
+    } finally { el.disabled = false; el.textContent = 'Email report'; }
+  },
+  saveSettings: async () => {
+    const f = formValues($('#settings'));
+    delete f.geo;
+    f.pain_locations = f.pain_locations.split('\n');
+    f.pain_types = f.pain_types.split('\n');
+    S.settings = await api('/settings', { method: 'PUT', body: f });
+    toast('Settings saved');
+    refresh();
+  },
+  geocode: async () => {
+    const form = $('#settings');
+    const name = form.geo.value.trim();
+    if (!name) return;
+    const res = await api('/geocode?name=' + encodeURIComponent(name));
+    $('#georesults').innerHTML = res.length ? res.map(r =>
+      `<button type="button" class="list-row" data-act="pickPlace" data-lat="${r.lat}" data-lon="${r.lon}" data-label="${esc(r.label)}"><span>${esc(r.label)}</span><span class="small muted">${r.lat.toFixed(2)}, ${r.lon.toFixed(2)}</span></button>`).join('')
+      : '<p class="help">No matches.</p>';
+  },
+  pickPlace: d => {
+    const form = $('#settings');
+    form.lat.value = d.lat; form.lon.value = d.lon; form.place.value = d.label;
+    $('#georesults').innerHTML = `<p class="help">Selected <b>${esc(d.label)}</b> — tap Save settings.</p>`;
+  },
+  testEmail: async () => {
+    const f = formValues($('#settings'));
+    S.settings = await api('/settings', { method: 'PUT', body: { ...f, pain_locations: f.pain_locations.split('\n'), pain_types: f.pain_types.split('\n') } });
+    const to = f.smtp_from || f.smtp_user;
+    if (!to) throw new Error('Fill in the username or From address first');
+    await api('/settings/test-email', { method: 'POST', body: { to } });
+    toast('Test email sent to ' + to);
+  },
+  backupNow: async () => { const r = await api('/backups', { method: 'POST' }); toast('Saved ' + r.name); },
+  importLog: async d => {
+    const f = formValues($('#importf'));
+    const body = { text: f.text, year: parseInt(f.year, 10), cycle_id: f.cycle_id ? +f.cycle_id : null, dry_run: !!d.dry };
+    if (!body.text.trim()) throw new Error('Paste a log first');
+    if (!d.dry && !confirm('Import these entries?')) return;
+    const r = await api('/import/text', { method: 'POST', body });
+    const pre = $('#importpreview');
+    pre.classList.remove('hide');
+    if (d.dry) {
+      pre.textContent = `${r.count} entries found.\n\n` + r.rows.map(x => `${x.at.replace('T', ' ')}  ${x.kind === 'pain' ? `KIP ${x.kip}  ` : ''}${x.note}`).join('\n')
+        + (r.errors.length ? `\n\nCouldn't place these lines:\n${r.errors.join('\n')}` : '');
+    } else {
+      pre.textContent = `Imported ${r.count} entries.`;
+      toast(`Imported ${r.count} entries`);
+    }
+  },
+};
+
+document.addEventListener('click', async ev => {
+  const el = ev.target.closest('[data-act]');
+  if (!el) return;
+  const fn = ACT[el.dataset.act];
+  if (!fn) return;
+  ev.preventDefault();
+  try { await fn(el.dataset, el, ev); } catch (e) { toast(e.message); }
+});
+document.addEventListener('keydown', ev => {
+  if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('[role=button][data-act]')) { ev.preventDefault(); ev.target.click(); }
+  if (ev.key === 'Escape') closeSheet();
+});
+
+/* ---------------------------------------------------------------- router */
+
+const ROUTES = [
+  [/^#?\/?$/, viewHome],
+  [/^#\/cycle\/(\d+)$/, viewCycle],
+  [/^#\/attack\/(\d+)$/, viewAttack],
+  [/^#\/loose$/, viewLoose],
+  [/^#\/learnings$/, viewLearnings],
+  [/^#\/treatments$/, viewTreatments],
+  [/^#\/export$/, viewExport],
+  [/^#\/settings$/, viewSettings],
+];
+
+let lastRoute = null;
+async function render() {
+  const hash = location.hash || '#/';
+  for (const [re, fn] of ROUTES) {
+    const m = hash.match(re);
+    if (!m) continue;
+    if (hash !== lastRoute) { closeSheet(); setBar(''); }
+    try { await fn(...m.slice(1)); } catch (e) {
+      app.innerHTML = pageHead('Something went wrong', '#/') + `<div class="empty"><p>${esc(e.message)}</p><a class="btn" href="#/">Home</a></div>`;
+      setBar('');
+    }
+    if (hash !== lastRoute) window.scrollTo(0, 0);
+    lastRoute = hash;
+    return;
+  }
+  location.hash = '#/';
+}
+async function refresh() {
+  const y = S.justEnded ? 0 : window.scrollY;  // show the "attack over" card from the top
+  await render();
+  window.scrollTo(0, y);
+}
+
+function tick() {
+  document.querySelectorAll('.ago[data-since]').forEach(el => { el.textContent = fmtDur(minsSince(el.dataset.since)); });
+}
+
+window.addEventListener('hashchange', render);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !document.querySelector('.sheet-wrap')) refresh(); });
+setInterval(tick, 15000);
+
+(async () => {
+  try { await Promise.all([loadTreatments(), loadSettings()]); } catch (e) { toast(e.message); }
+  render();
+})();

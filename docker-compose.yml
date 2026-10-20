@@ -1,0 +1,14 @@
+# ClusterLog. Settings come from .env (created by install.sh).
+services:
+  clusterlog:
+    build: .
+    image: clusterlog:local
+    container_name: clusterlog
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"   # files in ./data stay owned by you
+    ports:
+      - "${CLUSTERLOG_PORT:-8765}:8000"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data:/data                      # the whole database + auto-backups live here

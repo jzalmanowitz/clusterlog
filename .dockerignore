@@ -1,0 +1,6 @@
+data
+backups
+dist
+.env
+.git
+**/__pycache__
