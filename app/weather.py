@@ -15,7 +15,7 @@ import urllib.request
 import store
 
 HPA_TO_CMHG = 0.0750062
-PRESSURE_BASIS = "sea-level"  # snapshots without this marker are re-fetched (see store.init_db)
+PRESSURE_BASIS = "sea-level"
 UA = {"User-Agent": "ClusterLog/1.0 (self-hosted)"}
 
 
@@ -40,10 +40,11 @@ def fetch(at, lat, lon):
     age = (dt.date.today() - dt.date.fromisoformat(date)).days
     base = ("https://api.open-meteo.com/v1/forecast" if age <= 80
             else "https://archive-api.open-meteo.com/v1/archive")
+    day_before = (dt.date.fromisoformat(date) - dt.timedelta(days=1)).isoformat()  # for the 6-hour trend
     j = _get(base, {
         "latitude": lat, "longitude": lon, "timezone": "auto",
         "hourly": "temperature_2m,relative_humidity_2m,pressure_msl",
-        "start_date": date, "end_date": date,
+        "start_date": day_before, "end_date": date,
     })
     h = j.get("hourly") or {}
     times = h.get("time") or []
@@ -54,12 +55,16 @@ def fetch(at, lat, lon):
     t, rh, p = (h["temperature_2m"][i], h["relative_humidity_2m"][i], h["pressure_msl"][i])
     if t is None or rh is None or p is None:
         return None  # archive data lags a few days; retried later
+    p6 = h["pressure_msl"][i - 6] if i >= 6 else None
     return {
+        "v": store.WEATHER_VERSION,
         "temp_c": round(t, 1),
         "humidity": round(rh),
         "pressure_cmhg": round(p * HPA_TO_CMHG, 2),
         "pressure_kpa": round(p / 10, 2),
         "basis": PRESSURE_BASIS,
+        # change over the 6 hours before the headache (chinooks swing this hard)
+        "pressure_change_6h_cmhg": round((p - p6) * HPA_TO_CMHG, 2) if p6 is not None else None,
         "hour": target,
         "source": "open-meteo.com",
     }

@@ -5,13 +5,10 @@ FastAPI JSON API under /api, plus the static single-page app at /.
 import datetime as dt
 import json
 import re
-import smtplib
 import sqlite3
-import ssl
 import threading
 import time
 from contextlib import asynccontextmanager, closing
-from email.message import EmailMessage
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -24,7 +21,7 @@ import store
 import weather
 from store import bad, day, q, q1, ts, tx
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 STATIC_DIR = store.Path(__file__).parent / "static"
 
 
@@ -161,6 +158,7 @@ class TreatmentIn(BaseModel):
     quick: bool = False
     archived: bool = False
     sort: int = 0
+    max_per_day: Optional[int] = None   # daily dose limit (rolling 24h); None = no limit
 
 
 def treatment_values(b: TreatmentIn):
@@ -169,8 +167,10 @@ def treatment_values(b: TreatmentIn):
         bad("Name is required")
     if b.category not in store.CATEGORIES:
         bad("Unknown category")
+    if b.max_per_day is not None and b.max_per_day < 1:
+        bad("Daily limit must be 1 or more (or blank for none)")
     return (name, b.category, (b.default_amount or "").strip(), (b.uom or "").strip(),
-            int(b.uom_prefix), int(b.quick), int(b.archived), b.sort)
+            int(b.uom_prefix), int(b.quick), int(b.archived), b.sort, b.max_per_day)
 
 
 @app.get("/api/treatments")
@@ -182,8 +182,8 @@ def list_treatments(include_archived: bool = False):
 @app.post("/api/treatments")
 def create_treatment(b: TreatmentIn):
     with tx() as c:
-        tid = c.execute("INSERT INTO treatments(name, category, default_amount, uom, uom_prefix, quick, archived, sort)"
-                        " VALUES(?,?,?,?,?,?,?,?)", treatment_values(b)).lastrowid
+        tid = c.execute("INSERT INTO treatments(name, category, default_amount, uom, uom_prefix, quick, archived, sort,"
+                        " max_per_day) VALUES(?,?,?,?,?,?,?,?,?)", treatment_values(b)).lastrowid
     return q1("SELECT * FROM treatments WHERE id=?", (tid,))
 
 
@@ -191,7 +191,7 @@ def create_treatment(b: TreatmentIn):
 def update_treatment(tid: int, b: TreatmentIn):
     with tx() as c:
         n = c.execute("UPDATE treatments SET name=?, category=?, default_amount=?, uom=?, uom_prefix=?, quick=?,"
-                      " archived=?, sort=? WHERE id=?", (*treatment_values(b), tid)).rowcount
+                      " archived=?, sort=?, max_per_day=? WHERE id=?", (*treatment_values(b), tid)).rowcount
     if not n:
         bad("Treatment not found", 404)
     return q1("SELECT * FROM treatments WHERE id=?", (tid,))
@@ -481,7 +481,7 @@ def journal(cycle_id: Optional[str] = None, start: Optional[str] = None, end: Op
 @app.get("/api/recent")
 def recent(since: str):
     """Last dose of each treatment since `since`, newest first, with counts."""
-    rows = q("""SELECT e.treatment_id, e.title, e.at, t.name, t.category FROM entries e
+    rows = q("""SELECT e.treatment_id, e.title, e.at, t.name, t.category, t.max_per_day FROM entries e
                 LEFT JOIN treatments t ON t.id = e.treatment_id
                 WHERE e.kind='treatment' AND e.at >= ? ORDER BY e.at DESC, e.id DESC""", (ts(since),))
     out = {}
@@ -489,7 +489,7 @@ def recent(since: str):
         k = r["treatment_id"] or "t:" + r["title"]
         if k not in out:
             out[k] = {"treatment_id": r["treatment_id"], "title": r["title"], "name": r["name"] or r["title"],
-                      "category": r["category"], "last_at": r["at"], "count": 0}
+                      "category": r["category"], "max_per_day": r["max_per_day"], "last_at": r["at"], "count": 0}
         out[k]["count"] += 1
     return list(out.values())
 
@@ -514,7 +514,7 @@ def chart(cycle_id: Optional[str] = None, start: Optional[str] = None, end: Opti
     return Response(svg, media_type="image/svg+xml")
 
 
-# ---------------------------------------------------------------- reports & email
+# ---------------------------------------------------------------- reports
 
 @app.get("/api/report")
 def report(start: str, end: str, cycle_id: Optional[str] = None,
@@ -531,71 +531,10 @@ def report(start: str, end: str, cycle_id: Optional[str] = None,
     return Response(body, media_type=mt, headers=headers)
 
 
-class EmailIn(BaseModel):
-    start: str
-    end: str
-    cycle_id: Optional[str] = None
-    to: str
-    message: Optional[str] = ""
-    cc_self: bool = True
-
-
-EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
-
-
-def send_mail(msg: EmailMessage):
-    s = store.settings_raw()
-    if not s["smtp_host"]:
-        bad("Email isn't set up yet — add your SMTP details in Settings.")
-    sec = s["smtp_security"]
-    port = int(s["smtp_port"] or (465 if sec == "ssl" else 587))
-    sender = s["smtp_from"] or s["smtp_user"]
-    if not sender:
-        bad("Set a 'From' address in Settings.")
-    if "From" not in msg:
-        msg["From"] = sender
-    try:
-        ctx = ssl.create_default_context()
-        srv = (smtplib.SMTP_SSL(s["smtp_host"], port, timeout=25, context=ctx) if sec == "ssl"
-               else smtplib.SMTP(s["smtp_host"], port, timeout=25))
-        with srv:
-            if sec == "starttls":
-                srv.starttls(context=ctx)
-            if s["smtp_user"]:
-                srv.login(s["smtp_user"], s["smtp_password"])
-            srv.send_message(msg)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(502, f"Email failed: {e}")
-    return sender
-
-
-@app.post("/api/report/email")
-def email_report(b: EmailIn):
-    to = [x.strip() for x in re.split(r"[,;]", b.to or "") if x.strip()]
-    if not to or not all(EMAIL_RE.match(x) for x in to):
-        bad("Enter a valid email address")
-    r = reports.build(b.start, b.end, b.cycle_id)
-    s = store.settings_raw()
-    who = f" — {s['patient_name']}" if s["patient_name"] else ""
-    msg = EmailMessage()
-    msg["Subject"] = f"Cluster headache log {r['start']} to {r['end']}{who}"
-    msg["To"] = ", ".join(to)
-    sender = s["smtp_from"] or s["smtp_user"]
-    if b.cc_self and sender:
-        msg["Cc"] = sender
-    message = (b.message or "").strip()
-    msg.set_content((message + "\n\n" if message else "") + reports.text(r))
-    msg.add_alternative(reports.html(r, message, include_chart=False), subtype="html")
-    name = f"cluster-headache-log_{r['start']}_to_{r['end']}"
-    msg.add_attachment(reports.html(r).encode(), maintype="text", subtype="html", filename=name + ".html")
-    msg.add_attachment(reports.csv_text(r).encode(), maintype="text", subtype="csv", filename=name + ".csv")
-    send_mail(msg)
-    return {"ok": True, "to": to}
-
-
 # ---------------------------------------------------------------- settings
+
+FONT_SCALES = ("0.8", "0.9", "1", "1.15")
+
 
 @app.get("/api/settings")
 def get_settings():
@@ -605,8 +544,8 @@ def get_settings():
 @app.put("/api/settings")
 def put_settings(values: dict):
     values = dict(values)
-    if not values.pop("clear_password", False) and not values.get("smtp_password"):
-        values.pop("smtp_password", None)  # blank field = keep the saved password
+    if "font_scale" in values and str(values["font_scale"]) not in FONT_SCALES:
+        bad("Unknown text size")
     for k in ("lat", "lon"):
         if values.get(k) not in (None, ""):
             try:
@@ -617,22 +556,6 @@ def put_settings(values: dict):
     if values.get("lat") and values.get("lon"):
         threading.Thread(target=weather.fill_missing, daemon=True).start()
     return store.settings_public()
-
-
-class TestEmailIn(BaseModel):
-    to: str
-
-
-@app.post("/api/settings/test-email")
-def test_email(b: TestEmailIn):
-    if not EMAIL_RE.match(b.to.strip()):
-        bad("Enter a valid email address")
-    msg = EmailMessage()
-    msg["Subject"] = "ClusterLog test email"
-    msg["To"] = b.to.strip()
-    msg.set_content("If you can read this, ClusterLog can send email.")
-    send_mail(msg)
-    return {"ok": True}
 
 
 @app.get("/api/geocode")
@@ -647,7 +570,8 @@ def geocode(name: str):
 
 TABLES = {
     "cycles": ["id", "name", "started_on", "ended_on", "notes", "learnings", "created_at"],
-    "treatments": ["id", "name", "category", "default_amount", "uom", "uom_prefix", "quick", "archived", "sort"],
+    "treatments": ["id", "name", "category", "default_amount", "uom", "uom_prefix", "quick", "archived", "sort",
+                   "max_per_day"],
     "attacks": ["id", "cycle_id", "started_at", "ended_at", "side", "locations", "pain_types", "notes", "weather"],
     "entries": ["id", "kind", "at", "cycle_id", "attack_id", "kip", "phase", "treatment_id", "amount", "title", "note"],
 }
@@ -658,7 +582,7 @@ def backup_json():
     data = {"app": "clusterlog", "version": APP_VERSION, "exported_at": dt.datetime.now().isoformat(timespec="seconds")}
     for t, cols in TABLES.items():
         data[t] = q(f"SELECT {', '.join(cols)} FROM {t} ORDER BY id")
-    data["settings"] = {k: v for k, v in store.settings_raw().items() if k != "smtp_password"}
+    data["settings"] = store.settings_raw()
     return Response(json.dumps(data, indent=1, ensure_ascii=False), media_type="application/json",
                     headers={"Content-Disposition": f'attachment; filename="clusterlog-backup-{dt.date.today()}.json"'})
 
@@ -680,7 +604,7 @@ async def restore(request: Request):
                 keys = [k for k in cols if k in row]
                 c.execute(f"INSERT INTO {t}({', '.join(keys)}) VALUES({', '.join('?' * len(keys))})",
                           [row[k] for k in keys])
-    store.set_settings({k: v for k, v in (data.get("settings") or {}).items() if k != "smtp_password"})
+    store.set_settings(data.get("settings") or {})
     return {"ok": True, "safety_backup": safety.name,
             "counts": {t: len(data.get(t) or []) for t in TABLES}}
 

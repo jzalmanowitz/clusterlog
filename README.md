@@ -2,7 +2,7 @@
 
 A self-hosted, phone-first journal for cluster headaches. Log a headache one tap
 at a time while it's happening, fix the details "in the cold light of morning",
-and email a clean date-range report to your neurologist.
+and download a plain-text date-range report to email to your neurologist.
 
 Black background, white monospace text, big tap targets. Runs in Docker on a
 homelab box; all data is one SQLite file you own.
@@ -40,10 +40,8 @@ Screen*. It then opens full-screen like an app.
 
 - **Weather location** — search your city (currently **Calgary**); every headache
   then gets a weather snapshot automatically.
-- **Your name / neurologist's name and email** — used on reports.
-- **Email (SMTP)** — needed for the "Email report" button. For Gmail: host
-  `smtp.gmail.com`, port `587`, STARTTLS, your address as username and a Google
-  *App Password*. Use "Send test email" to check.
+- **Text size** — Small / Medium (default) / Large / Extra large; applies instantly.
+- **Your name / neurologist's name** — printed at the top of reports.
 - **Meds & treatments** — a starter list is pre-loaded from the example log; edit,
   archive or add your own (name, category, default amount, unit).
 
@@ -93,13 +91,16 @@ curve, weather at start (↑/↓ vs. previous headache) and the timeline.
   *Other / custom event* with your own title, any date/time.
 - **Chart tab** — days across, time of day down: ● attack (size = peak KIP) with
   a bar for its duration, ◇ abortive dose, ◆ preventive/emergent dose, plus an
-  attacks-per-day strip. Week lines follow cycle weeks.
-- **Stats tab** — attacks/day, median/longest length, peak KIP, attack-free days,
-  start-time histogram, per-week table, per-treatment "time to attack end".
+  headaches-per-day strip. Week lines follow cycle weeks.
+- **Stats tab** — headaches/day, median/longest length, peak KIP, headache-free
+  days, start-time histogram, per-week table, per-treatment "time to headache end".
+- **Daily limits** — give a treatment a limit (e.g. 2 per 24h for triptans): the
+  count shows under "Since last dose", and logging past it asks for confirmation.
 - **Report** — pick a date range (presets: this cycle, 7/30/90 days) →
-  *Email report* (text body + printable HTML + CSV attached), *Open printable
-  report* (includes the chart; Share → Print → save as PDF on iPhone), CSV,
-  text file, copy, or open in your mail app.
+  **Download report (.txt)**: plain text, no formatting or symbols, just the
+  facts — attach it to an email yourself (on iPhone it lands in Files →
+  Downloads). The app never sends email. Also available: copy the text, a CSV
+  for spreadsheets, and a printable page with the daily chart.
 - **Import an old text log** (Settings) — paste Evernote/Docs logs in the
   `Feb 7` / `0042 - start oxygen, kip 6` format. Lines become notes; "kip N"
   lines become pain points. Then create past attacks with start/end times and the
@@ -113,7 +114,7 @@ curve, weather at start (↑/↓ vs. previous headache) and the timeline.
 |---|---|
 | Automatic | A daily SQLite snapshot in `data/backups/` (last 30 kept). |
 | Manual, on the server | `scripts/backup.sh` → `backups/clusterlog-backup-<stamp>.tar.gz` |
-| From the phone | Settings → *Download full backup (JSON)* (everything except the SMTP password) |
+| From the phone | Settings → *Download full backup (JSON)* |
 | Restore | `scripts/restore.sh <file.tar.gz or .db>`, or Settings → *Restore from a JSON backup* (a safety snapshot is taken first) |
 | Move to a new server | `scripts/package.sh --with-data` → copy `dist/clusterlog-*.tar.gz` → `tar xzf … && cd clusterlog && ./install.sh` |
 | Remove | `scripts/uninstall.sh` (stops the container, keeps `./data`) |
@@ -134,7 +135,6 @@ phone (Safari) ──HTTP──▶ Docker container "clusterlog" (port 8765 → 
                          └─ SQLite (WAL)        /data/clusterlog.db  ← ./data on the host
                               background thread: daily backup + weather back-fill (hourly)
                          ──HTTPS──▶ open-meteo.com (weather + city lookup, no API key)
-                         ──SMTP───▶ your mail provider (optional)
 ```
 
 - **No build step, no Node.** Plain JS front end; Python standard library plus
@@ -154,7 +154,8 @@ phone (Safari) ──HTTP──▶ Docker container "clusterlog" (port 8765 → 
 | `install.sh` | Install / update |
 | `scripts/` | `backup.sh`, `restore.sh`, `package.sh`, `uninstall.sh`, shared `lib.sh` |
 | `Dockerfile`, `docker-compose.yml`, `.env` | Container build and runtime config |
-| `app/main.py` | API routes, email, backup/restore, text-log import, maintenance thread |
+| `app/main.py` | API routes, backup/restore, text-log import, maintenance thread |
+| `tests/` | `run.sh` (throwaway server + all tests), `test_api.py`, `ui_walkthrough.py` (Playwright, phone-size) |
 | `app/store.py` | Schema, DB helpers, validation, statistics, week grouping |
 | `app/reports.py` | Report builder (text / HTML / CSV) and the daily SVG chart |
 | `app/weather.py` | Open-Meteo fetch + geocoding |
@@ -166,10 +167,10 @@ phone (Safari) ──HTTP──▶ Docker container "clusterlog" (port 8765 → 
 | Table | Key columns |
 |---|---|
 | `cycles` | `name`, `started_on`, `ended_on` (null = active), `notes`, `learnings` |
-| `treatments` | `name`, `category` (abortive · preventive · emergent · supplement · other), `default_amount`, `uom`, `uom_prefix` ("level 3"), `quick`, `archived`, `sort` |
+| `treatments` | `name`, `category` (abortive · preventive · emergent · supplement · other), `default_amount`, `uom`, `uom_prefix` ("level 3"), `quick`, `archived`, `sort`, `max_per_day` |
 | `attacks` | `cycle_id`, `started_at`, `ended_at` (null = in progress), `side`, `locations` (JSON), `pain_types` (JSON), `notes`, `weather` (JSON, read-only) |
 | `entries` | `kind` (pain · treatment · note · event), `at`, `cycle_id`, `attack_id`, `kip`, `phase`, `treatment_id`, `amount`, `title` (dose label snapshot, e.g. "Oxygen, 15 L/min"), `note` |
-| `settings` | key/value (SMTP, location, patient/neurologist, pain option lists) |
+| `settings` | key/value (location, patient/neurologist, pain option lists, text size) |
 | view `attacks_v` | attacks + `number` (per cycle), `peak_kip`, `last_kip` |
 
 Rules worth knowing:
@@ -187,7 +188,7 @@ Rules worth knowing:
   weather reports quote — stored in cmHg (shown everywhere) and kPa (shown on the
   attack screen and in the CSV; Environment Canada's unit). Snapshots carry
   `"basis": "sea-level"`; any without it are cleared at startup and re-fetched.
-- Cycle learnings are private: they never appear in reports, CSV or email.
+- Cycle learnings are private: they never appear in reports or CSV.
 
 ### API (all JSON unless noted)
 
@@ -202,11 +203,17 @@ GET  /api/journal?cycle_id=(id|none)&start=&end=
 GET  /api/recent?since=                     GET /api/stats?cycle_id=&start=&end=&today=
 GET  /api/chart/daily.svg?cycle_id=&start=&end=&theme=(dark|light)&meds=(key|all|none)
 GET  /api/report?start=&end=&cycle_id=&format=(text|html|csv)&download=true
-POST /api/report/email
-GET|PUT /api/settings   POST /api/settings/test-email   GET /api/geocode?name=
+GET|PUT /api/settings   GET /api/geocode?name=
 GET  /api/backup (JSON download)   POST /api/restore   GET|POST /api/backups
 POST /api/import/text   {text, year, cycle_id, dry_run}
 ```
+
+### Schema changes
+
+`SCHEMA` in `app/store.py` is the version-1 baseline and is never edited. Each
+later change is an entry in `MIGRATIONS` (`(version, sql)`), applied once in
+order at startup and recorded in `PRAGMA user_version`. Weather snapshots carry a
+format version (`WEATHER_VERSION`); bumping it makes older snapshots re-fetch.
 
 ### Development
 
@@ -218,3 +225,13 @@ cd app && CLUSTERLOG_DATA=../data-dev ../.venv/bin/uvicorn main:app --reload --p
 Static files are served from disk, so front-end edits show up on reload. The
 Docker image copies the code in at build time, so run `./install.sh` again to
 deploy changes.
+
+### Tests
+
+```bash
+tests/run.sh .venv/bin/python     # API tests + phone-size UI walkthrough (if Playwright is installed)
+```
+
+`run.sh` starts a throwaway server on port 8799 with an empty temporary
+database, so it never touches real data. For the UI walkthrough:
+`.venv/bin/pip install playwright && .venv/bin/playwright install chromium-headless-shell`.

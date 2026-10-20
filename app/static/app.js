@@ -130,7 +130,7 @@ const opt = (type, name, value, label, checked) =>
 const radios = (name, opts, val) => opts.map(([v, l]) => opt('radio', name, v, l, String(v) === String(val ?? ''))).join('');
 const checks = (name, opts, vals) => opts.map(v => opt('checkbox', name, v, v, (vals || []).includes(v))).join('');
 const kipRadios = (val) => `<div class="kip-grid">${[...Array(11).keys()].map(i =>
-  `<label class="opt" style="display:block"><input type="radio" name="kip" value="${i}"${String(val) === String(i) ? ' checked' : ''}><span class="chip" style="width:100%;justify-content:center;min-height:56px;border-radius:12px;font-size:20px">${i}</span></label>`).join('')}</div>`;
+  `<label class="opt" style="display:block"><input type="radio" name="kip" value="${i}"${String(val) === String(i) ? ' checked' : ''}><span class="chip" style="width:100%;justify-content:center;min-height:56px;border-radius:12px;font-size:var(--s-lg)">${i}</span></label>`).join('')}</div>`;
 
 function union(base, extra) {
   const out = [...(base || [])];
@@ -200,7 +200,16 @@ async function copyText(t) {
 /* ---------------------------------------------------------------- data helpers */
 
 async function loadTreatments() { S.treatments = await api('/treatments?include_archived=true'); }
-async function loadSettings() { S.settings = await api('/settings'); }
+async function loadSettings() { S.settings = await api('/settings'); applyFontScale(S.settings.font_scale); }
+
+const FONT_SCALES = [['0.8', 'Small'], ['0.9', 'Medium'], ['1', 'Large'], ['1.15', 'Extra large']];
+/** Text size lives in settings (survives reinstalls) and localStorage (applied before the first fetch). */
+function applyFontScale(v) {
+  if (!v) return;
+  document.documentElement.style.setProperty('--fs', v);
+  try { localStorage.setItem('fontScale', v); } catch { /* private mode */ }
+}
+try { applyFontScale(localStorage.getItem('fontScale')); } catch { /* private mode */ }
 const activeTreatments = () => S.treatments.filter(t => !t.archived);
 const treatment = id => S.treatments.find(t => t.id === +id);
 const recentSince = () => api('/recent?since=' + encodeURIComponent(addMin(nowLocal(), -24 * 60)));
@@ -282,7 +291,8 @@ function recentHTML(list, attack) {
     const h = hints[r.treatment_id];
     const hint = attack && !attack.ended_at && inAttack.has(String(r.treatment_id)) && h && h.n >= 2
       ? `<div class="small muted">headaches usually end ~${fmtDur(h.median)} after this${h.p25 != null ? ` (${fmtDur(h.p25)}–${fmtDur(h.p75)})` : ''} · n=${h.n}</div>` : '';
-    return `<div class="list-row"><div><b>${esc(r.title)}</b>${r.count > 1 ? ` <span class="muted">×${r.count}</span>` : ''}${hint}</div>
+    const limit = r.max_per_day ? `<div class="small${r.count >= r.max_per_day ? '' : ' muted'}">${r.count >= r.max_per_day ? '<b>Daily limit reached</b> · ' : ''}${r.count} of ${r.max_per_day} in 24h</div>` : '';
+    return `<div class="list-row"><div><b>${esc(r.title)}</b>${r.count > 1 && !r.max_per_day ? ` <span class="muted">×${r.count}</span>` : ''}${limit}${hint}</div>
       <div><b><span class="ago" data-since="${r.last_at}">${fmtDur(minsSince(r.last_at))}</span></b> <span class="muted">ago</span></div></div>`;
   }).join('')}</section>`;
 }
@@ -474,7 +484,7 @@ async function viewAttack(id) {
   h += recentHTML(recent, a);
   h += chartSVG(a, pains);
   h += `<section><h2>Weather at start</h2>${a.weather
-    ? `<div><b>${esc(weatherBits(a.weather, a.prev_weather))}</b><div class="small muted">${a.weather.pressure_kpa != null ? `${a.weather.pressure_kpa.toFixed(2)} kPa · ` : ''}sea-level pressure${a.prev_weather ? ' · arrows vs. previous headache' : ''}<br>${esc(a.weather.place || '')} · ${a.weather.hour.slice(11)} · ${esc(a.weather.source)}</div></div>`
+    ? `<div><b>${esc(weatherBits(a.weather, a.prev_weather))}</b><div class="small muted">${a.weather.pressure_kpa != null ? `${a.weather.pressure_kpa.toFixed(2)} kPa · ` : ''}sea-level pressure${a.weather.pressure_change_6h_cmhg != null ? ` · ${a.weather.pressure_change_6h_cmhg > 0 ? '+' : ''}${a.weather.pressure_change_6h_cmhg.toFixed(2)} cmHg over the 6 h before` : ''}${a.prev_weather ? ' · arrows vs. previous headache' : ''}<br>${esc(a.weather.place || '')} · ${a.weather.hour.slice(11)} · ${esc(a.weather.source)}</div></div>`
     : `<p class="small muted">${S.settings.lat ? 'Fetching… (retried hourly if the server is offline)' : 'Set your location in Settings to record weather automatically.'}</p>`}</section>`;
   h += `<section><h2>Timeline</h2>${journalHTML([a], a.entries, null, { asc: true, weeks: false, links: false })}</section>`;
   app.innerHTML = h;
@@ -584,7 +594,6 @@ const treatmentRow = t => `<button class="list-row" data-act="editTreatment" dat
 async function viewExport() {
   const cycles = await api('/cycles?today=' + today());
   const open = cycles.find(c => !c.ended_on);
-  const st = S.settings;
   let h = pageHead('Report', '#/');
   h += `<form id="exp" class="pad" novalidate>
     <h2>Date range</h2>
@@ -601,22 +610,14 @@ async function viewExport() {
       ${cycles.map(c => `<option value="${c.id}">Only cycle: ${esc(c.name)}</option>`).join('')}
       <option value="none">Only entries outside a cycle</option></select>
 
-    <section><h2>Email</h2>
-      <label class="f">To</label><input type="email" name="to" value="${esc(st.recipient)}" placeholder="neurologist@example.com" autocomplete="email">
-      <label class="f">Message <span class="muted">(optional)</span></label>
-      <textarea name="message" placeholder="Hi Dr. …, here's my log since my last appointment.">${st.neurologist_name ? `Hi ${esc(st.neurologist_name)},\n\nHere is my cluster headache log for this period.\n\n${esc(st.patient_name)}` : ''}</textarea>
-      <div class="check"><input type="checkbox" name="cc_self" data-bool checked id="cc"><label for="cc">Send me a copy</label></div>
-      <button type="button" class="btn primary wide" data-act="emailReport"${st.smtp_host ? '' : ' disabled'}>Email report</button>
-      ${st.smtp_host ? '<p class="help">Sends a text + HTML summary with the printable report and a CSV attached.</p>'
-        : '<p class="help">Email isn\'t set up yet — add SMTP details in <a href="#/settings">Settings</a>, or use "Open in mail app" below.</p>'}
-    </section>
-    <section><h2>Other ways</h2><div class="stack">
-      <button type="button" class="btn wide" data-act="openReport" data-fmt="html">Open printable report</button>
-      <div class="row"><button type="button" class="btn" data-act="openReport" data-fmt="csv" data-dl="1">CSV</button>
-        <button type="button" class="btn" data-act="openReport" data-fmt="text" data-dl="1">Text file</button></div>
+    <button type="button" class="btn primary wide big" data-act="openReport" data-fmt="text" data-dl="1" style="margin-top:24px">Download report (.txt)</button>
+    <p class="help">A plain-text file — just the facts, no formatting. Attach it to an email to your neurologist.
+      On iPhone it lands in Files → Downloads.</p>
+    <section><h2>Other formats</h2><div class="stack">
       <div class="row"><button type="button" class="btn" data-act="copyReport">Copy text</button>
-        <button type="button" class="btn" data-act="mailtoReport">Open in mail app</button></div>
-    </div><p class="help">The printable report includes the daily chart. On a phone: open it, then Share → Print → pinch out to save a PDF.</p></section>
+        <button type="button" class="btn" data-act="openReport" data-fmt="csv" data-dl="1">Spreadsheet (CSV)</button></div>
+      <button type="button" class="btn ghost wide" data-act="openReport" data-fmt="html">Printable page with chart</button>
+    </div></section>
     <section><h2>Preview</h2><pre class="preview" id="preview">Loading…</pre></section>
   </form>`;
   app.innerHTML = h;
@@ -643,14 +644,15 @@ async function viewSettings() {
   const s = S.settings;
   let h = pageHead('Settings', '#/');
   h += `<form id="settings" novalidate>
+    <section><h2>Text size</h2><div class="chips">${FONT_SCALES.map(([v, l]) =>
+      `<button type="button" class="chip ${String(s.font_scale) === v ? 'on' : ''}" data-act="fontScale" data-v="${v}">${l}</button>`).join('')}</div></section>
     <section><h2>You &amp; your neurologist</h2>
       <label class="f">Your name <span class="muted">(shown on reports)</span></label><input name="patient_name" value="${esc(s.patient_name)}" autocomplete="name">
-      <label class="f">Neurologist's name</label><input name="neurologist_name" value="${esc(s.neurologist_name)}" placeholder="Dr. …">
-      <label class="f">Neurologist's email</label><input type="email" name="recipient" value="${esc(s.recipient)}" autocomplete="off">
+      <label class="f">Neurologist's name <span class="muted">(shown on reports)</span></label><input name="neurologist_name" value="${esc(s.neurologist_name)}" placeholder="Dr. …">
     </section>
     <section><h2>Weather location</h2>
       <p class="help" style="margin-top:0">Weather (°C, humidity %, pressure cmHg) is recorded automatically for each headache from Open-Meteo. ${s.place ? `Currently: <b>${esc(s.place)}</b>` : 'No location set.'}</p>
-      <div class="row"><input name="geo" placeholder="City, e.g. Edmonton"><button type="button" class="btn" data-act="geocode" style="flex:0 0 auto">Find</button></div>
+      <div class="row"><input name="geo" placeholder="City, e.g. Calgary"><button type="button" class="btn" data-act="geocode" style="flex:0 0 auto">Find</button></div>
       <div id="georesults"></div>
       <div class="row"><div><label class="f">Latitude</label><input name="lat" value="${esc(s.lat)}" inputmode="decimal"></div>
         <div><label class="f">Longitude</label><input name="lon" value="${esc(s.lon)}" inputmode="decimal"></div></div>
@@ -660,19 +662,9 @@ async function viewSettings() {
       <label class="f">Locations <span class="muted">(one per line)</span></label><textarea name="pain_locations" rows="6">${esc(s.pain_locations.join('\n'))}</textarea>
       <label class="f">Pain types <span class="muted">(one per line)</span></label><textarea name="pain_types" rows="6">${esc(s.pain_types.join('\n'))}</textarea>
     </section>
-    <section><h2>Email (SMTP)</h2>
-      <p class="help" style="margin-top:0">For Gmail: host <b>smtp.gmail.com</b>, port <b>587</b>, STARTTLS, your Gmail address as username, and an <b>App Password</b> (Google Account → Security → App passwords).</p>
-      <label class="f">SMTP host</label><input name="smtp_host" value="${esc(s.smtp_host)}" placeholder="smtp.gmail.com" autocapitalize="off">
-      <div class="row"><div><label class="f">Port</label><input name="smtp_port" value="${esc(s.smtp_port)}" inputmode="numeric"></div>
-        <div><label class="f">Security</label><select name="smtp_security">${[['starttls', 'STARTTLS'], ['ssl', 'SSL/TLS'], ['none', 'None']].map(([v, l]) => `<option value="${v}"${s.smtp_security === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div></div>
-      <label class="f">Username</label><input name="smtp_user" value="${esc(s.smtp_user)}" autocapitalize="off" autocomplete="off">
-      <label class="f">Password</label><input type="password" name="smtp_password" placeholder="${s.has_password ? '•••••• saved — leave blank to keep' : ''}" autocomplete="new-password">
-      <label class="f">From address</label><input type="email" name="smtp_from" value="${esc(s.smtp_from)}" placeholder="defaults to username">
-      <button type="button" class="btn wide" data-act="testEmail" style="margin-top:16px">Send test email to me</button>
-    </section>
   </form>
   <section><h2>Backup &amp; move to another server</h2>
-    <p class="help" style="margin-top:0">An automatic backup is made daily (last 30 kept, ${backups.length} on file). The JSON file below contains everything except your SMTP password.</p>
+    <p class="help" style="margin-top:0">An automatic backup is made daily (last 30 kept, ${backups.length} on file). The JSON file below contains everything.</p>
     <div class="stack"><a class="btn wide" href="/api/backup" download>Download full backup (JSON)</a>
       <button class="btn wide ghost" data-act="backupNow">Make a server backup now</button>
       <label class="btn wide ghost" for="restorefile">Restore from a JSON backup…</label>
@@ -787,7 +779,8 @@ const undoToast = (msg, e, edit) => toast(msg, [
   { label: 'Undo', fn: async () => { await api('/entries/' + e.id, { method: 'DELETE' }); refresh(); } },
   { label: 'Edit', fn: () => edit(e) }]);
 
-function treatmentSheet({ cycle = null, attack = null, entry = null } = {}) {
+function treatmentSheet({ cycle = null, attack = null, entry = null, recent = [] } = {}) {
+  const used = id => recent.find(r => r.treatment_id === +id)?.count || 0;
   const cur = entry ? (entry.kind === 'event' ? '' : entry.treatment_id) : null;
   const groups = CATS.map(([cat, label]) => {
     const list = S.treatments.filter(t => t.category === cat && (!t.archived || t.id === cur));
@@ -800,7 +793,7 @@ function treatmentSheet({ cycle = null, attack = null, entry = null } = {}) {
   openSheet(entry ? (isEvent ? 'Edit event' : 'Edit dose') : 'Medication / treatment', `
     <label class="f">When</label><input type="datetime-local" name="at" value="${atDefault}">
     ${quick.length ? `<label class="f">Tap to log</label><div class="stack">${quick.map(t =>
-      `<button type="submit" class="btn wide" name="quick" value="${t.id}">${esc(doseLabel(t, t.default_amount))}</button>`).join('')}</div>
+      `<button type="submit" class="btn wide" name="quick" value="${t.id}">${esc(doseLabel(t, t.default_amount))}${t.max_per_day ? `<span class="small" style="font-weight:400">${used(t.id)}/${t.max_per_day} in 24h</span>` : ''}</button>`).join('')}</div>
       <label class="f" style="margin-top:32px">Or pick one and set the dose</label>` : ''}
     ${groups}
     <div class="chips" style="margin-top:16px">${opt('radio', 'treatment_id', '', 'Other / custom event…', isEvent)}</div>
@@ -831,6 +824,9 @@ function treatmentSheet({ cycle = null, attack = null, entry = null } = {}) {
       else body = f.treatment_id
         ? { kind: 'treatment', treatment_id: +f.treatment_id, amount: f.amount, note: f.note }
         : { kind: 'event', title: f.title, note: f.note };
+      const t = body.treatment_id && treatment(body.treatment_id);
+      if (!entry && t?.max_per_day && used(t.id) >= t.max_per_day
+          && !confirm(`${t.name}: ${used(t.id)} of ${t.max_per_day} doses already in the last 24 hours. Log anyway?`)) return true;
       Object.assign(body, { at: f.at,
         attack_id: entry ? entry.attack_id : (attack ? +attack : null),
         cycle_id: entry ? entry.cycle_id : (cycle ? +cycle : null) });
@@ -931,6 +927,8 @@ function treatmentEditSheet(t = null) {
     <div class="check"><input type="checkbox" id="pfx" name="uom_prefix" data-bool${t?.uom_prefix ? ' checked' : ''}><label for="pfx">Unit goes before the amount (e.g. "level 3")</label></div>
     <div class="check"><input type="checkbox" id="qk" name="quick" data-bool${t?.quick ? ' checked' : ''}><label for="qk">Quick: listed first under Medication, one tap logs it</label></div>
     ${t ? `<div class="check"><input type="checkbox" id="ar" name="archived" data-bool${t.archived ? ' checked' : ''}><label for="ar">Archived (hidden from pickers)</label></div>` : ''}
+    <label class="f">Daily limit <span class="muted">(doses per 24h — blank for none)</span></label>
+    <input name="max_per_day" inputmode="numeric" value="${t?.max_per_day ?? ''}" placeholder="e.g. 2 for triptans">
     <label class="f">Sort order <span class="muted">(lower = first)</span></label><input name="sort" inputmode="numeric" value="${t?.sort ?? 100}">
     <p class="help" id="tpreview"></p>`, {
     submitLabel: t ? 'Save' : 'Add',
@@ -943,7 +941,7 @@ function treatmentEditSheet(t = null) {
       form.addEventListener('input', sync); form.addEventListener('change', sync); sync();
     },
     onSubmit: async f => {
-      const body = { ...f, sort: parseInt(f.sort, 10) || 0, archived: !!f.archived };
+      const body = { ...f, sort: parseInt(f.sort, 10) || 0, archived: !!f.archived, max_per_day: parseInt(f.max_per_day, 10) || null };
       await api(t ? '/treatments/' + t.id : '/treatments', { method: t ? 'PUT' : 'POST', body });
       await loadTreatments();
     },
@@ -970,7 +968,7 @@ const ACT = {
   tab: d => { S.tab = d.v; refresh(); },
   meds: d => { S.meds = d.v; refresh(); },
   startAttack: d => startAttackSheet(d.cycle),
-  addTreatment: d => treatmentSheet({ cycle: d.cycle || null, attack: d.attack || null }),
+  addTreatment: async d => treatmentSheet({ cycle: d.cycle || null, attack: d.attack || null, recent: await recentSince() }),
   addNote: d => noteSheet({ cycle: d.cycle || null, attack: d.attack || null }),
   addPain: d => painSheet({ attack: d.attack }),
   editEntry: d => {
@@ -1013,19 +1011,10 @@ const ACT = {
     const t = await api(reportQuery(exportParams(), 'text'));
     toast((await copyText(t)) ? 'Report copied — paste it into an email' : 'Copy failed — select the preview text instead');
   },
-  mailtoReport: async () => {
-    const f = exportParams();
-    const t = await api(reportQuery(f, 'text'));
-    const body = (f.message ? f.message + '\n\n' : '') + t;
-    location.href = `mailto:${(f.to || '').trim()}?subject=${encodeURIComponent(`Cluster headache log ${f.start} to ${f.end}`)}&body=${encodeURIComponent(body)}`;
-  },
-  emailReport: async (d, el) => {
-    const f = exportParams();
-    el.disabled = true; el.textContent = 'Sending…';
-    try {
-      const r = await api('/report/email', { method: 'POST', body: { start: f.start, end: f.end, cycle_id: f.cycle_id, to: f.to, message: f.message, cc_self: f.cc_self } });
-      toast('Sent to ' + r.to.join(', '));
-    } finally { el.disabled = false; el.textContent = 'Email report'; }
+  fontScale: async (d, el) => {
+    applyFontScale(d.v);
+    el.parentElement.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el));
+    S.settings = await api('/settings', { method: 'PUT', body: { font_scale: d.v } });
   },
   saveSettings: async () => {
     const f = formValues($('#settings'));
@@ -1049,14 +1038,6 @@ const ACT = {
     const form = $('#settings');
     form.lat.value = d.lat; form.lon.value = d.lon; form.place.value = d.label;
     $('#georesults').innerHTML = `<p class="help">Selected <b>${esc(d.label)}</b> — tap Save settings.</p>`;
-  },
-  testEmail: async () => {
-    const f = formValues($('#settings'));
-    S.settings = await api('/settings', { method: 'PUT', body: { ...f, pain_locations: f.pain_locations.split('\n'), pain_types: f.pain_types.split('\n') } });
-    const to = f.smtp_from || f.smtp_user;
-    if (!to) throw new Error('Fill in the username or From address first');
-    await api('/settings/test-email', { method: 'POST', body: { to } });
-    toast('Test email sent to ' + to);
   },
   backupNow: async () => { const r = await api('/backups', { method: 'POST' }); toast('Saved ' + r.name); },
   importLog: async d => {

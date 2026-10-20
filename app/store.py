@@ -61,20 +61,15 @@ SEED_TREATMENTS = [
 SETTING_DEFAULTS = {
     "patient_name": "",
     "neurologist_name": "",
-    "recipient": "",
-    "smtp_host": "",
-    "smtp_port": "587",
-    "smtp_security": "starttls",
-    "smtp_user": "",
-    "smtp_password": "",
-    "smtp_from": "",
     "lat": "",
     "lon": "",
     "place": "",
+    "font_scale": "0.9",
     "pain_locations": json.dumps(DEFAULT_LOCATIONS),
     "pain_types": json.dumps(DEFAULT_PAIN_TYPES),
 }
 LIST_SETTINGS = ("pain_locations", "pain_types")
+WEATHER_VERSION = 2  # bump to make stored weather snapshots re-fetch (see weather.fetch)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cycles (
@@ -131,6 +126,15 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+"""
+
+# Ordered schema changes for databases created by an earlier version. SCHEMA
+# above is the version-1 baseline; never edit it — add a migration instead.
+MIGRATIONS = [
+    (2, "ALTER TABLE treatments ADD COLUMN max_per_day INTEGER"),  # daily dose limit, e.g. triptans 2/24h
+]
+
+VIEWS = """
 DROP VIEW IF EXISTS attacks_v;
 CREATE VIEW attacks_v AS
   SELECT a.*,
@@ -182,6 +186,14 @@ def init_db():
     with closing(connect()) as c:
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        version = c.execute("PRAGMA user_version").fetchone()[0] or 1
+        for v, sql in MIGRATIONS:
+            if version < v:
+                with c:
+                    c.execute(sql)
+                    c.execute(f"PRAGMA user_version={v}")
+                version = v
+        c.executescript(VIEWS)
         with c:
             seeded = c.execute("SELECT value FROM settings WHERE key='seeded'").fetchone()
             if not seeded:
@@ -191,10 +203,11 @@ def init_db():
                             "INSERT INTO treatments(name,category,default_amount,uom,uom_prefix,quick,sort)"
                             " VALUES(?,?,?,?,?,?,?)", (*t, i * 10))
                 c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('seeded','1')")
-            # v1.0.1: pressure switched to sea-level barometric; re-fetch older snapshots
+            # v1.1: in-app email removed — drop stored SMTP credentials
+            c.execute("DELETE FROM settings WHERE key LIKE 'smtp_%' OR key = 'recipient'")
+            # re-fetch weather snapshots from older formats (v1.0.1 sea-level pressure, v1.1 6-hour trend)
             c.execute("UPDATE attacks SET weather = NULL WHERE weather IS NOT NULL"
-                      " AND json_extract(weather, '$.basis') IS NOT 'sea-level'")
-            c.execute("PRAGMA user_version=1")
+                      " AND IFNULL(json_extract(weather, '$.v'), 1) < ?", (WEATHER_VERSION,))
 
 
 # ---------------------------------------------------------------- validation
@@ -269,13 +282,12 @@ def settings_raw():
 
 def settings_public():
     s = settings_raw()
-    out = {k: s[k] for k in SETTING_DEFAULTS if k != "smtp_password"}
+    out = {k: s[k] for k in SETTING_DEFAULTS}
     for k in LIST_SETTINGS:
         try:
             out[k] = json.loads(s[k])
         except (TypeError, ValueError):
             out[k] = json.loads(SETTING_DEFAULTS[k])
-    out["has_password"] = bool(s["smtp_password"])
     return out
 
 
@@ -374,10 +386,10 @@ def week_key(cycle, date):
         if n >= 1:
             ws = start + dt.timedelta(days=(n - 1) * 7)
             we = ws + dt.timedelta(days=6)
-            return (f"c{cycle['id']}-{n:04d}", f"Week {n} · {ws:%d %b} – {we:%d %b %Y}")
+            return (f"c{cycle['id']}-{n:04d}", f"Week {n} ({ws:%d %b} to {we:%d %b %Y})")
     ws = d - dt.timedelta(days=d.weekday())
     we = ws + dt.timedelta(days=6)
-    return (f"w{ws.isoformat()}", f"Week of {ws:%d %b} – {we:%d %b %Y}")
+    return (f"w{ws.isoformat()}", f"Calendar week {ws:%d %b} to {we:%d %b %Y}")
 
 
 # ---------------------------------------------------------------- statistics

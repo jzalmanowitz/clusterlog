@@ -23,7 +23,9 @@ original wording. Status markers: ✅ done in v1.0 · 🟡 partial · ⏳ not ye
 ## Core functionality ("the crux")
 
 1. ✅ Self-hosted web app.
-2. ✅ Export a date range to email to the neurologist.
+2. ✅ Export a date range to email to the neurologist. Clarified: **no email from the
+   app** — download a plain `.txt` report (no markdown or HTML formatting, just the
+   facts) and attach it to an email by hand.
 3. ✅ Track cycles in a date/time journal format.
 
 ## Cycles
@@ -93,6 +95,8 @@ original wording. Status markers: ✅ done in v1.0 · 🟡 partial · ⏳ not ye
   defaulting to today's date/time.
 
 ## Look & feel
+
+- ✅ Smaller default text, with a text-size setting (Small / Medium / Large / Extra large).
 
 - ✅ Dark mode with decent colour contrast. Colours aren't important: black
   background, white text, bold for headings, otherwise a monospace font like Consolas.
