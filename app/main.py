@@ -21,7 +21,7 @@ import store
 import weather
 from store import bad, day, q, q1, ts, tx
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.0-beta"
 STATIC_DIR = store.Path(__file__).parent / "static"
 
 
