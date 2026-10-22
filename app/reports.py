@@ -8,6 +8,7 @@ from html import escape
 import store
 from store import PHASES, fmt_dur, minutes
 
+CAT_WORDS = {k: v.lower() for k, v in store.CATEGORIES.items()}
 TAGS = {"pain": "Pain", "treatment": "Med", "note": "Note", "event": "Event", "start": "Start", "end": "End"}
 KEY_MED_CATEGORIES = ("abortive", "preventive", "emergent")
 
@@ -81,6 +82,7 @@ def build(d_from, d_to, cycle_id=None):
     stats_cycle = cycle or (cycles.get(next(iter(used - {None}))) if len(used - {None}) == 1 else None)
     stats = store.compute_stats(attacks, entries, d_from, d_to, stats_cycle)
     prev_w = prev_weather_map(attacks)
+    log = store.med_log(attacks, entries)
 
     items = []
     for a in attacks:
@@ -117,8 +119,37 @@ def build(d_from, d_to, cycle_id=None):
                    if c in cycles],
         "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "stats": stats, "weeks": weeks,
+        "meds": [{"name": t["name"], "category": t["category"], "mode": t["mode"], "days": med_days(t["name"], log.get(t["key"], []))}
+                 for t in stats["treatments"]],
         "attacks": attacks, "entries": entries, "cycle": stats_cycle,
     }
+
+
+def session_text(e):
+    """', 00:42 to 01:01 (19 min)' for a duration treatment; '' for a dose."""
+    if e.get("mode") != "duration":
+        return ""
+    if not e.get("ended_at"):
+        return ", no stop time recorded"
+    return f", {hhmm(e['at'])} to {hhmm(e['ended_at'])} ({fmt_mins(minutes(e['at'], e['ended_at']))})"
+
+
+def med_days(name, doses):
+    """One medication's uses grouped by day: [{'date', 'label', 'uses': ['00:42 (15 L/min, 19 min, headache 3)']}]."""
+    out = []
+    for d in doses:
+        bits = []
+        if d["amount"]:  # the dose part of 'Oxygen, 15 L/min' (raw amount if the med was renamed since)
+            bits.append(d["title"][len(name) + 2:] if d["title"].startswith(name + ", ") else d["amount"])
+        if d["mode"] == "duration":
+            bits.append(fmt_mins(d["length"]) if d["length"] is not None else "no stop time")
+        if d["attack_number"]:
+            bits.append(f"headache {d['attack_number']}")
+        use = hhmm(d["at"]) + (f" ({', '.join(bits)})" if bits else "")
+        if not out or out[-1]["date"] != d["at"][:10]:
+            out.append({"date": d["at"][:10], "label": fmt_date(d["at"]), "uses": []})
+        out[-1]["uses"].append(use)
+    return out
 
 
 def line(at, typ, o, prev_w):
@@ -145,7 +176,7 @@ def line(at, typ, o, prev_w):
     if e["kind"] == "pain":
         text = f"Pain KIP {e['kip']}" + (f", {PHASES.get(e['phase'], e['phase'])}" if e["phase"] else "")
     elif e["kind"] == "treatment":
-        text = f"Medication: {e['title']}"
+        text = f"Medication: {e['title']}{session_text(e)}"
     elif e["kind"] == "event":
         text = f"Event: {e['title']}"
     else:
@@ -179,6 +210,9 @@ def _hour_buckets(by_hour):
 
 def _treat_line(t):
     s = f"used {plural(t['uses'], 'time')}"
+    if t["mode"] == "duration" and t["session"]["n"]:
+        s += (f" (median session {fmt_mins(t['session']['median'])}, "
+              f"total {fmt_mins(t['total_min'])})")
     if t["in_attacks"]:
         s += f", {t['in_attacks']} during headaches"
     te = t["to_end"]
@@ -221,6 +255,14 @@ def text(r):
         L += ["", "Treatments:"]
         for t in s["treatments"]:
             L.append(f"{t['name']}: {_treat_line(t)}")
+    if r["meds"]:
+        L += ["", "Medication log", "",
+              "Each time a medication or treatment was used, grouped by medication. "
+              "Session lengths are shown for treatments with a start and stop time."]
+        for m in r["meds"]:
+            L += ["", f"{m['name']} ({CAT_WORDS.get(m['category'], m['category'])})"]
+            for d in m["days"]:
+                L.append(f"{d['label']}: {'; '.join(d['uses'])}")
     L += ["", "Daily log"]
     if not r["weeks"]:
         L += ["", "Nothing was logged in this period."]
@@ -300,6 +342,16 @@ def html(r, include_chart=True):
         for t in s["treatments"]:
             o.append(f"<tr><td><b>{e(t['name'])}</b></td><td>{e(_treat_line(t))}</td></tr>")
         o.append("</table>")
+    if r["meds"]:
+        o.append("<h2>Medication log</h2><p class='muted'>Each time a medication or treatment was used, grouped by "
+                 "medication. Session lengths are shown for treatments with a start and stop time.</p>")
+        for m in r["meds"]:
+            o.append(f"<h4>{e(m['name'])} <span class='muted'>· {e(CAT_WORDS.get(m['category'], m['category']))}</span>"
+                     "</h4><table class='stats'>")
+            for d in m["days"]:
+                o.append(f"<tr><td style='width:150px;white-space:nowrap'>{d['label']}</td>"
+                         f"<td>{e('; '.join(d['uses']))}</td></tr>")
+            o.append("</table>")
     o.append("<h2>Daily log</h2>")
     if not r["weeks"]:
         o.append("<p class='muted'>Nothing logged in this period.</p>")
@@ -327,7 +379,7 @@ def csv_text(r):
     w = csv.writer(buf)
     w.writerow(["date", "time", "cycle", "headache", "kind", "kip", "phase", "treatment", "amount",
                 "title", "note", "side", "locations", "pain_types", "temp_c", "humidity_pct", "pressure_cmhg",
-                "pressure_kpa"])
+                "pressure_kpa", "stopped", "duration_min"])
     cycles = {c["id"]: c["name"] for c in store.q("SELECT id, name FROM cycles")}
     tnames = {t["id"]: t["name"] for t in store.q("SELECT id, name FROM treatments")}
     num = {a["id"]: a["number"] for a in r["attacks"]}
@@ -338,16 +390,18 @@ def csv_text(r):
         rows.append((a["started_at"], [*base, "headache_start", "", "", "", "", "", a["notes"], a["side"],
                                        "; ".join(a["locations"]), "; ".join(a["pain_types"]),
                                        wx.get("temp_c", ""), wx.get("humidity", ""), wx.get("pressure_cmhg", ""),
-                                       wx.get("pressure_kpa", "")]))
+                                       wx.get("pressure_kpa", ""), "", ""]))
         if a["ended_at"]:
             rows.append((a["ended_at"], [*base, "headache_end", a["peak_kip"] if a["peak_kip"] is not None else "",
                                          "", "", "", f"lasted {minutes(a['started_at'], a['ended_at'])} min",
-                                         "", "", "", "", "", "", "", ""]))
+                                         "", "", "", "", "", "", "", "", "", ""]))
     for e in r["entries"]:
         rows.append((e["at"], [cycles.get(e["cycle_id"], ""), num.get(e["attack_id"], ""), e["kind"],
                                e["kip"] if e["kip"] is not None else "", PHASES.get(e["phase"] or "", ""),
                                tnames.get(e["treatment_id"], ""), e["amount"], e["title"], e["note"],
-                               "", "", "", "", "", "", ""]))
+                               "", "", "", "", "", "", "",
+                               e["ended_at"].replace("T", " ") if e.get("ended_at") else "",
+                               minutes(e["at"], e["ended_at"]) if e.get("ended_at") else ""]))
     rows.sort(key=lambda x: x[0])
     for at, vals in rows:
         w.writerow([at[:10], at[11:16], *vals])

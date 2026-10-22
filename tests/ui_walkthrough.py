@@ -67,6 +67,9 @@ with sync_playwright() as p:
     pg.click(".sheet button[name=quick] >> nth=0")
     pg.wait_for_timeout(500)
     add_event("Medication / treatment")
+    pg.click(".sheet button[name=quick]:has-text('Zomig')")
+    pg.wait_for_timeout(500)
+    add_event("Medication / treatment")
     pg.click(".sheet label.opt:has-text('Oxygen')")
     pg.fill(".sheet input[name=amount]", "25")
     pg.click(".sheet-foot >> text=Log it")
@@ -82,7 +85,12 @@ with sync_playwright() as p:
     shot("06-headache-full", full=True)
     assert "Peak" in pg.inner_text("#app"), "auto-phase should mark a peak once pain drops"
 
+    assert "running" in pg.inner_text("#app"), "oxygen should show as running"
     pg.click("#bar >> text=End headache")
+    pg.wait_for_selector(".sheet input[name=stop_ids]")
+    assert pg.locator(".sheet input[name=stop_ids]").count() == 2, "both oxygen sessions offered for stopping"
+    pg.click(".sheet .check label >> nth=0")
+    shot("07-end-sheet")
     pg.click(".sheet-foot >> text=End headache")
     pg.wait_for_selector("text=Headache over")
     shot("07-over")
@@ -92,6 +100,27 @@ with sync_playwright() as p:
         pg.click(f".tabs >> text={tab}")
         pg.wait_for_timeout(600)
         shot(f"08-{tab.lower()}")
+
+    # one session is still running after the headache: stop it from the cycle screen
+    assert pg.locator("text=Running now").count() == 1
+    shot("09a-running")
+    pg.click("[data-act=stopEntry]")
+    pg.click(".sheet-foot >> text=Stop")
+    pg.wait_for_timeout(600)
+    assert pg.locator("text=Running now").count() == 0
+
+    # Stats -> tap a treatment -> its history; switch to another med
+    pg.click(".tabs >> text=Stats")
+    pg.wait_for_selector("a.list-row:has-text('Oxygen')")
+    pg.click("a.list-row:has-text('Oxygen')")
+    pg.wait_for_selector("text=Every use")
+    assert pg.locator(".jrow").count() == 2 and "until" in pg.inner_text("#app")
+    shot("09b-med", full=True)
+    pg.select_option("#medpick", label="Zomig nasal spray (1)")
+    pg.wait_for_selector(".top h1:has-text('Zomig')")
+    assert pg.locator(".jrow").count() == 1
+    pg.click(".back")
+    pg.wait_for_selector(".tabs button.on:has-text('Stats')")
 
     # report: plain .txt download
     pg.goto(U + "#/export")

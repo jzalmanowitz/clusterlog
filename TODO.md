@@ -60,6 +60,14 @@ rebuild restarts the app and could interrupt logging mid-headache.
 - [ ] Off-box backups (e.g. copy `data/backups/` to a NAS on a cron).
 ## Done
 
+- 2026-10-21 — v1.2: treatments are a *dose* or a *duration* (`treatments.mode`,
+  `entries.ended_at`); running sessions with Stop on home/cycle/headache screens,
+  optional stop when a headache ends. Existing oxygen / cold compress / e-stim
+  entries were back-filled with stop = end of their headache.
+- 2026-10-21 — v1.2: Stats → tap a treatment for its full history (one med at a
+  time); per-med "Medication log" section in the text/HTML report, CSV gains
+  `stopped` / `duration_min`.
+
 - 2026-10-19 — v1.1: plain `.txt` report is the main export; in-app email and
   SMTP settings removed (stored SMTP credentials are deleted on startup).
   "Headache" wording everywhere, report text has no symbols or markup.

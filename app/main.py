@@ -21,7 +21,7 @@ import store
 import weather
 from store import bad, day, q, q1, ts, tx
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 STATIC_DIR = store.Path(__file__).parent / "static"
 
 
@@ -159,6 +159,7 @@ class TreatmentIn(BaseModel):
     archived: bool = False
     sort: int = 0
     max_per_day: Optional[int] = None   # daily dose limit (rolling 24h); None = no limit
+    mode: str = "dose"                  # "dose" or "duration" (started, later stopped)
 
 
 def treatment_values(b: TreatmentIn):
@@ -169,8 +170,10 @@ def treatment_values(b: TreatmentIn):
         bad("Unknown category")
     if b.max_per_day is not None and b.max_per_day < 1:
         bad("Daily limit must be 1 or more (or blank for none)")
+    if b.mode not in store.MODES:
+        bad("Type must be dose or duration")
     return (name, b.category, (b.default_amount or "").strip(), (b.uom or "").strip(),
-            int(b.uom_prefix), int(b.quick), int(b.archived), b.sort, b.max_per_day)
+            int(b.uom_prefix), int(b.quick), int(b.archived), b.sort, b.max_per_day, b.mode)
 
 
 @app.get("/api/treatments")
@@ -183,7 +186,7 @@ def list_treatments(include_archived: bool = False):
 def create_treatment(b: TreatmentIn):
     with tx() as c:
         tid = c.execute("INSERT INTO treatments(name, category, default_amount, uom, uom_prefix, quick, archived, sort,"
-                        " max_per_day) VALUES(?,?,?,?,?,?,?,?,?)", treatment_values(b)).lastrowid
+                        " max_per_day, mode) VALUES(?,?,?,?,?,?,?,?,?,?)", treatment_values(b)).lastrowid
     return q1("SELECT * FROM treatments WHERE id=?", (tid,))
 
 
@@ -191,10 +194,26 @@ def create_treatment(b: TreatmentIn):
 def update_treatment(tid: int, b: TreatmentIn):
     with tx() as c:
         n = c.execute("UPDATE treatments SET name=?, category=?, default_amount=?, uom=?, uom_prefix=?, quick=?,"
-                      " archived=?, sort=?, max_per_day=? WHERE id=?", (*treatment_values(b), tid)).rowcount
+                      " archived=?, sort=?, max_per_day=?, mode=? WHERE id=?", (*treatment_values(b), tid)).rowcount
     if not n:
         bad("Treatment not found", 404)
     return q1("SELECT * FROM treatments WHERE id=?", (tid,))
+
+
+@app.get("/api/treatments/{tid}/log")
+def treatment_log(tid: int, cycle_id: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None,
+                  today: Optional[str] = None):
+    """One treatment's summary row plus every use of it, for the drill-in from Stats."""
+    t = q1("SELECT * FROM treatments WHERE id=?", (tid,)) or bad("Treatment not found", 404)
+    d_from, d_to = day(start, required=False), day(end, required=False)
+    attacks, entries = store.load(cycle_id, d_from, d_to)
+    cycle = store.get_cycle(int(cycle_id)) if cycle_id and cycle_id.isdigit() else None
+    s = store.compute_stats(attacks, entries, d_from, d_to, cycle, day(today, required=False))
+    return {"treatment": t,
+            "summary": next((r for r in s["treatments"] if r["treatment_id"] == tid), None),
+            "others": [{"treatment_id": r["treatment_id"], "name": r["name"], "uses": r["uses"]}
+                       for r in s["treatments"] if r["treatment_id"]],
+            "doses": store.med_log(attacks, entries).get(str(tid), [])}
 
 
 @app.delete("/api/treatments/{tid}")
@@ -236,6 +255,7 @@ class AttackPatch(BaseModel):
 class AttackEnd(BaseModel):
     ended_at: str
     note: Optional[str] = ""
+    stop_ids: list[int] = []        # running duration treatments to stop at the same time
 
 
 def absorb(c, attack_id):
@@ -303,7 +323,7 @@ def get_attack(aid: int):
         FROM attacks_v a LEFT JOIN cycles c ON c.id = a.cycle_id WHERE a.id=?""", (aid,)))
     if not a:
         bad("Attack not found", 404)
-    a["entries"] = q("""SELECT e.*, t.category AS category FROM entries e
+    a["entries"] = q("""SELECT e.*, t.category AS category, t.mode AS mode FROM entries e
         LEFT JOIN treatments t ON t.id = e.treatment_id WHERE e.attack_id=? ORDER BY e.at, e.id""", (aid,))
     prev = q1("SELECT weather FROM attacks WHERE weather IS NOT NULL AND (started_at < ? OR (started_at = ? AND id < ?))"
               " ORDER BY started_at DESC, id DESC LIMIT 1", (a["started_at"], a["started_at"], aid))
@@ -363,6 +383,8 @@ def end_attack(aid: int, b: AttackEnd):
         if (b.note or "").strip():
             c.execute("INSERT INTO entries(kind, at, cycle_id, attack_id, note) VALUES('note',?,?,?,?)",
                       (end, a["cycle_id"], aid, b.note.strip()))
+        for eid in b.stop_ids:
+            stop(c, eid, end)
     return get_attack(aid)
 
 
@@ -386,6 +408,7 @@ class EntryIn(BaseModel):
     amount: Optional[str] = ""
     title: Optional[str] = ""
     note: Optional[str] = ""
+    ended_at: Optional[str] = None  # stop time, duration treatments only
 
 
 def find_attack(c, cycle_id, at):
@@ -413,7 +436,7 @@ def entry_values(c, b: EntryIn):
             a = find_attack(c, cycle_id, at)
             attack_id = a["id"] if a else None
     v = {"kind": b.kind, "at": at, "cycle_id": cycle_id, "attack_id": attack_id, "kip": None, "phase": None,
-         "treatment_id": None, "amount": "", "title": "", "note": (b.note or "").strip()}
+         "treatment_id": None, "amount": "", "title": "", "note": (b.note or "").strip(), "ended_at": None}
     if b.kind == "pain":
         if b.kip is None or not 0 <= b.kip <= 10:
             bad("Pick a KIP level 0–10")
@@ -426,6 +449,12 @@ def entry_values(c, b: EntryIn):
             bad("Pick a treatment")
         amount = (b.amount or "").strip()
         v.update(treatment_id=t["id"], amount=amount, title=store.dose_label(t, amount))
+        if b.ended_at:
+            if t["mode"] != "duration":
+                bad(f"{t['name']} is logged as a dose, so it has no stop time")
+            v["ended_at"] = ts(b.ended_at, "stop time")
+            if v["ended_at"] < at:
+                bad("Stop time is before start time")
     elif b.kind == "event":
         title = (b.title or "").strip()
         if not title:
@@ -437,7 +466,7 @@ def entry_values(c, b: EntryIn):
 
 
 def get_entry(eid):
-    return q1("""SELECT e.*, t.category AS category FROM entries e
+    return q1("""SELECT e.*, t.category AS category, t.mode AS mode FROM entries e
                  LEFT JOIN treatments t ON t.id = e.treatment_id WHERE e.id=?""", (eid,)) or bad("Entry not found", 404)
 
 
@@ -461,6 +490,36 @@ def update_entry(eid: int, b: EntryIn):
         if v["attack_id"]:
             c.execute("UPDATE attacks SET started_at=? WHERE id=? AND started_at > ?", (v["at"], v["attack_id"], v["at"]))
     return get_entry(eid)
+
+
+class StopIn(BaseModel):
+    ended_at: str
+
+
+def stop(c, eid, end):
+    e = c.execute("""SELECT e.at, t.mode FROM entries e JOIN treatments t ON t.id = e.treatment_id
+                     WHERE e.id=? AND e.kind='treatment'""", (eid,)).fetchone()
+    if not e or e["mode"] != "duration":
+        bad("That isn't a running treatment", 404)
+    if end < e["at"]:
+        bad("Stop time is before start time")
+    c.execute("UPDATE entries SET ended_at=? WHERE id=?", (end, eid))
+
+
+@app.post("/api/entries/{eid}/stop")
+def stop_entry(eid: int, b: StopIn):
+    with tx() as c:
+        stop(c, eid, ts(b.ended_at, "stop time"))
+    return get_entry(eid)
+
+
+@app.get("/api/running")
+def running(since: str):
+    """Duration treatments started since `since` (the client sends now - 24h) and not stopped yet.
+    Older ones without a stop time are treated as 'no stop time recorded', not running."""
+    return q("""SELECT e.*, t.name, t.category, t.mode FROM entries e JOIN treatments t ON t.id = e.treatment_id
+                WHERE e.kind='treatment' AND t.mode='duration' AND e.ended_at IS NULL AND e.at >= ?
+                ORDER BY e.at, e.id""", (ts(since),))
 
 
 @app.delete("/api/entries/{eid}")
@@ -571,9 +630,10 @@ def geocode(name: str):
 TABLES = {
     "cycles": ["id", "name", "started_on", "ended_on", "notes", "learnings", "created_at"],
     "treatments": ["id", "name", "category", "default_amount", "uom", "uom_prefix", "quick", "archived", "sort",
-                   "max_per_day"],
+                   "max_per_day", "mode"],
     "attacks": ["id", "cycle_id", "started_at", "ended_at", "side", "locations", "pain_types", "notes", "weather"],
-    "entries": ["id", "kind", "at", "cycle_id", "attack_id", "kip", "phase", "treatment_id", "amount", "title", "note"],
+    "entries": ["id", "kind", "at", "cycle_id", "attack_id", "kip", "phase", "treatment_id", "amount", "title", "note",
+                "ended_at"],
 }
 
 

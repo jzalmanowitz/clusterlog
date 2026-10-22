@@ -13,7 +13,7 @@ SERVER=$!
 curl -s --retry 20 --retry-connrefused --retry-delay 1 -o /dev/null "http://127.0.0.1:$PORT/api/health"
 "$PY" tests/test_api.py "http://127.0.0.1:$PORT"
 if "$PY" -c "import playwright" 2>/dev/null; then
-  "$PY" tests/ui_walkthrough.py "http://127.0.0.1:$PORT" "$DATA/shots"
+  "$PY" tests/ui_walkthrough.py "http://127.0.0.1:$PORT" "${SHOTS:-$DATA/shots}"
 else
   echo "(Playwright not installed — skipping UI walkthrough)"
 fi

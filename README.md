@@ -95,13 +95,22 @@ curve, weather at start (↑/↓ vs. previous headache) and the timeline.
   headaches-per-day strip. Week lines follow cycle weeks.
 - **Stats tab** — headaches/day, median/longest length, peak KIP, headache-free
   days, start-time histogram, per-week table, per-treatment "time to headache end".
+  Tap a treatment to see every time it was used (one med at a time, switch with
+  the *Show* picker), with links to each headache.
+- **Dose or duration** — each treatment is either a *dose* (one moment, e.g. Zomig)
+  or a *duration* (started, then stopped: oxygen, cold compress, electro-stim).
+  Duration treatments show under **Running now** on the home, cycle and headache
+  screens with a **Stop** button; *End headache* offers to stop them too (unticked,
+  since you may keep going). Stats show median session length and total time.
 - **Daily limits** — give a treatment a limit (e.g. 2 per 24h for triptans): the
   count shows under "Since last dose", and logging past it asks for confirmation.
 - **Report** — pick a date range (presets: this cycle, 7/30/90 days) →
   **Download report (.txt)**: plain text, no formatting or symbols, just the
   facts — attach it to an email yourself (on iPhone it lands in Files →
   Downloads). The app never sends email. Also available: copy the text, a CSV
-  for spreadsheets, and a printable page with the daily chart.
+  for spreadsheets, and a printable page with the daily chart. The report includes
+  a **Medication log**: every med, each day it was used, with times, doses,
+  session lengths and which headache it was for.
 - **Import an old text log** (Settings) — paste Evernote/Docs logs in the
   `Feb 7` / `0042 - start oxygen, kip 6` format. Lines become notes; "kip N"
   lines become pain points. Then create past attacks with start/end times and the

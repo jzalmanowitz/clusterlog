@@ -34,29 +34,31 @@ CATEGORIES = {
     "other": "Other",
 }
 KINDS = ("pain", "treatment", "note", "event")
+MODES = ("dose", "duration")  # one moment, or started and later stopped (oxygen, cold compress)
 SIDES = ("", "Left", "Right", "Both", "Alternating")
 
 DEFAULT_LOCATIONS = ["neck", "jaw", "nose", "sinuses", "eye", "temple", "crown", "cheekbone"]
 DEFAULT_PAIN_TYPES = ["pounding", "piercing", "stabbing", "throbbing", "like a knife", "pressure", "woke me up"]
 
-# name, category, default_amount, uom, uom_prefix, quick
+# name, category, default_amount, uom, uom_prefix, quick, mode
 SEED_TREATMENTS = [
-    ("Oxygen", "abortive", "15", "L/min", 0, 1),
-    ("Zomig nasal spray", "abortive", "5", "mg", 0, 1),
-    ("Flonase", "abortive", "", "", 0, 1),
-    ("Cold compress / ice wrap", "abortive", "", "", 0, 1),
-    ("Electro-stimulation", "abortive", "3", "level", 1, 1),
-    ("Energy drink (caffeine)", "abortive", "473", "ml", 0, 1),
-    ("Tylenol + Advil (extra strength)", "other", "", "", 0, 1),
-    ("Verapamil", "preventive", "80", "mg", 0, 0),
-    ("Psilocybin", "preventive", "0.25", "g", 0, 0),
-    ("Emgality injection", "emergent", "300", "mg", 0, 0),
-    ("Occipital nerve block", "emergent", "", "", 0, 0),
-    ("Vitamin D3", "supplement", "10000", "IU", 0, 0),
-    ("Vitamin B12 (sublingual)", "supplement", "1000", "mcg", 0, 0),
-    ("Magnesium", "supplement", "", "", 0, 0),
-    ("Melatonin", "supplement", "2", "mg", 0, 0),
+    ("Oxygen", "abortive", "15", "L/min", 0, 1, "duration"),
+    ("Zomig nasal spray", "abortive", "5", "mg", 0, 1, "dose"),
+    ("Flonase", "abortive", "", "", 0, 1, "dose"),
+    ("Cold compress / ice wrap", "abortive", "", "", 0, 1, "duration"),
+    ("Electro-stimulation", "abortive", "3", "level", 1, 1, "duration"),
+    ("Energy drink (caffeine)", "abortive", "473", "ml", 0, 1, "dose"),
+    ("Tylenol + Advil (extra strength)", "other", "", "", 0, 1, "dose"),
+    ("Verapamil", "preventive", "80", "mg", 0, 0, "dose"),
+    ("Psilocybin", "preventive", "0.25", "g", 0, 0, "dose"),
+    ("Emgality injection", "emergent", "300", "mg", 0, 0, "dose"),
+    ("Occipital nerve block", "emergent", "", "", 0, 0, "dose"),
+    ("Vitamin D3", "supplement", "10000", "IU", 0, 0, "dose"),
+    ("Vitamin B12 (sublingual)", "supplement", "1000", "mcg", 0, 0, "dose"),
+    ("Magnesium", "supplement", "", "", 0, 0, "dose"),
+    ("Melatonin", "supplement", "2", "mg", 0, 0, "dose"),
 ]
+DURATION_SEEDS = tuple(t[0] for t in SEED_TREATMENTS if t[6] == "duration")
 
 SETTING_DEFAULTS = {
     "patient_name": "",
@@ -132,6 +134,14 @@ CREATE TABLE IF NOT EXISTS settings (
 # above is the version-1 baseline; never edit it — add a migration instead.
 MIGRATIONS = [
     (2, "ALTER TABLE treatments ADD COLUMN max_per_day INTEGER"),  # daily dose limit, e.g. triptans 2/24h
+    (3, "ALTER TABLE treatments ADD COLUMN mode TEXT NOT NULL DEFAULT 'dose'"),
+    (4, f"UPDATE treatments SET mode = 'duration' WHERE name IN ({', '.join(repr(n) for n in DURATION_SEEDS)})"),
+    (5, "ALTER TABLE entries ADD COLUMN ended_at TEXT"),  # stop time of a duration treatment; NULL = running / unknown
+    # sessions logged before 1.2 had no stop time: assume they ran until their headache ended
+    (6, """UPDATE entries SET ended_at = (SELECT a.ended_at FROM attacks a WHERE a.id = entries.attack_id)
+           WHERE kind = 'treatment' AND ended_at IS NULL
+             AND treatment_id IN (SELECT id FROM treatments WHERE mode = 'duration')
+             AND (SELECT a.ended_at FROM attacks a WHERE a.id = entries.attack_id) >= at"""),
 ]
 
 VIEWS = """
@@ -200,8 +210,8 @@ def init_db():
                 if c.execute("SELECT COUNT(*) FROM treatments").fetchone()[0] == 0:
                     for i, t in enumerate(SEED_TREATMENTS):
                         c.execute(
-                            "INSERT INTO treatments(name,category,default_amount,uom,uom_prefix,quick,sort)"
-                            " VALUES(?,?,?,?,?,?,?)", (*t, i * 10))
+                            "INSERT INTO treatments(name,category,default_amount,uom,uom_prefix,quick,mode,sort)"
+                            " VALUES(?,?,?,?,?,?,?,?)", (*t, i * 10))
                 c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('seeded','1')")
             # v1.1: in-app email removed — drop stored SMTP credentials
             c.execute("DELETE FROM settings WHERE key LIKE 'smtp_%' OR key = 'recipient'")
@@ -360,7 +370,7 @@ def load(cycle_id=None, d_from=None, d_to=None):
     w, a = scope(cycle_id, d_from, d_to, "started_at")
     attacks = [attack_out(r) for r in q(f"SELECT * FROM attacks_v{w} ORDER BY started_at, id", a)]
     w, a = scope(cycle_id, d_from, d_to, "at")
-    entries = q(f"SELECT e.*, t.category AS category FROM entries e "
+    entries = q(f"SELECT e.*, t.category AS category, t.mode AS mode FROM entries e "
                 f"LEFT JOIN treatments t ON t.id = e.treatment_id"
                 f"{w.replace('cycle_id', 'e.cycle_id')} ORDER BY at, e.id", a)
     return attacks, entries
@@ -438,7 +448,7 @@ def compute_stats(attacks, entries, d_from=None, d_to=None, cycle=None, today=No
     for a in attacks:
         by_hour[int(a["started_at"][11:13])] += 1
 
-    tinfo = {t["id"]: t for t in q("SELECT id, name, category FROM treatments")}
+    tinfo = {t["id"]: t for t in q("SELECT id, name, category, mode FROM treatments")}
     by_id = {a["id"]: a for a in attacks}
     tre, seen = {}, set()
     for e in entries:
@@ -446,10 +456,14 @@ def compute_stats(attacks, entries, d_from=None, d_to=None, cycle=None, today=No
             continue
         key = e["treatment_id"] or ("t:" + e["title"])
         t = tinfo.get(e["treatment_id"])
-        r = tre.setdefault(key, {"name": t["name"] if t else e["title"],
+        r = tre.setdefault(key, {"key": str(key), "treatment_id": e["treatment_id"],
+                                 "name": t["name"] if t else e["title"],
                                  "category": t["category"] if t else "other",
-                                 "uses": 0, "in_attacks": 0, "to_end": []})
+                                 "mode": t["mode"] if t else "dose",
+                                 "uses": 0, "in_attacks": 0, "to_end": [], "sessions": []})
         r["uses"] += 1
+        if e.get("ended_at"):
+            r["sessions"].append(max(0, minutes(e["at"], e["ended_at"])))
         a = by_id.get(e["attack_id"])
         if a:
             r["in_attacks"] += 1
@@ -457,7 +471,8 @@ def compute_stats(attacks, entries, d_from=None, d_to=None, cycle=None, today=No
                 seen.add((a["id"], key))
                 r["to_end"].append(max(0, minutes(e["at"], a["ended_at"])))
     treatments = sorted(
-        ({**r, "to_end": summarize(r["to_end"])} for r in tre.values()),
+        ({**r, "to_end": summarize(r["to_end"]), "session": summarize(r["sessions"]),
+          "total_min": sum(r.pop("sessions"))} for r in tre.values()),
         key=lambda r: (-r["uses"], r["name"]))
 
     # weekly table (cycle weeks when scoped to a cycle, else calendar weeks)
@@ -501,6 +516,25 @@ def compute_stats(attacks, entries, d_from=None, d_to=None, cycle=None, today=No
         "weeks": week_list,
         "treatments": treatments,
     }
+
+
+def med_log(attacks, entries):
+    """Every use of each treatment, oldest first, keyed like compute_stats rows
+    (str(treatment_id), or 't:<title>' for a treatment that no longer exists)."""
+    by_id = {a["id"]: a for a in attacks}
+    out = {}
+    for e in entries:
+        if e["kind"] != "treatment":
+            continue
+        a = by_id.get(e["attack_id"])
+        out.setdefault(str(e["treatment_id"] or "t:" + e["title"]), []).append({
+            "id": e["id"], "kind": "treatment", "treatment_id": e["treatment_id"], "cycle_id": e["cycle_id"],
+            "at": e["at"], "ended_at": e.get("ended_at"), "mode": e.get("mode") or "dose",
+            "amount": e["amount"], "title": e["title"], "note": e["note"],
+            "attack_id": e["attack_id"], "attack_number": a["number"] if a else None,
+            "length": max(0, minutes(e["at"], e["ended_at"])) if e.get("ended_at") else None,
+            "to_end": max(0, minutes(e["at"], a["ended_at"])) if a and a["ended_at"] else None})
+    return out
 
 
 def history_hints(exclude=None):

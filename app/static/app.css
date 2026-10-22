@@ -95,6 +95,9 @@ details.more summary { cursor: pointer; color: var(--mute); padding: 12px 0; min
   border-bottom: 1px solid var(--hair); }
 .list-row > :first-child { min-width: 0; overflow-wrap: anywhere; }
 .list-row > :last-child:not(:first-child) { text-align: right; white-space: nowrap; }
+a.list-row { color: inherit; text-decoration: none; }
+.list-row.running { align-items: center; }
+.list-row.running > :last-child { display: flex; align-items: center; gap: 12px; }
 button.list-row { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--hair); color: inherit;
   font: inherit; text-align: left; cursor: pointer; }
 

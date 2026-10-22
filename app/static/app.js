@@ -213,6 +213,9 @@ try { applyFontScale(localStorage.getItem('fontScale')); } catch { /* private mo
 const activeTreatments = () => S.treatments.filter(t => !t.archived);
 const treatment = id => S.treatments.find(t => t.id === +id);
 const recentSince = () => api('/recent?since=' + encodeURIComponent(addMin(nowLocal(), -24 * 60)));
+/** Duration treatments (oxygen, cold compress…) started in the past 24h and not stopped yet. */
+const runningNow = () => api('/running?since=' + encodeURIComponent(addMin(nowLocal(), -24 * 60)));
+const isRunning = e => e.mode === 'duration' && !e.ended_at && minsSince(e.at) < 24 * 60;
 function doseLabel(t, amount) {
   amount = (amount ?? '').trim(); const uom = (t.uom || '').trim();
   if (!amount) return t.name;
@@ -227,10 +230,16 @@ function weatherBits(w, prev) {
 
 /* ---------------------------------------------------------------- journal */
 
+/** ' · until 0101 (19m)' / ' · running 12m' / ' · no stop time' for a duration treatment. */
+function sessionBit(e) {
+  if (e.mode !== 'duration') return '';
+  if (e.ended_at) return ` · until ${hhmm(e.ended_at)} (${fmtDur(minsBetween(e.at, e.ended_at))})`;
+  return isRunning(e) ? ` · running <span class="ago" data-since="${e.at}">${fmtDur(minsSince(e.at))}</span>` : ' · no stop time';
+}
 function entryText(e) {
   const note = e.note ? esc(e.note) : '';
   if (e.kind === 'pain') return `<b>KIP ${e.kip}</b>${e.phase ? ' · ' + PHASE_LABEL[e.phase] : ''}${note ? ' — ' + note : ''}`;
-  if (e.kind === 'treatment' || e.kind === 'event') return `<b>${esc(e.title)}</b>${note ? ' — ' + note : ''}`;
+  if (e.kind === 'treatment' || e.kind === 'event') return `<b>${esc(e.title)}</b>${sessionBit(e)}${note ? ' — ' + note : ''}`;
   return note;
 }
 const entryRow = e => `<div class="jrow${e.attack_id ? ' in' : ''}" data-act="editEntry" data-id="${e.id}" role="button" tabindex="0">
@@ -283,6 +292,14 @@ function journalHTML(attacks, entries, cycle, { asc = false, weeks = true, links
   return out;
 }
 
+function runningHTML(list) {
+  if (!list.length) return '';
+  return `<section><h2>Running now</h2>${list.map(e => `<div class="list-row running"><div><b>● ${esc(e.title)}</b>
+      <div class="small muted">started ${hhmm(e.at)}${dayDiff(e.at, nowLocal()) ? ' ' + dayLabel(e.at) : ''}</div></div>
+    <div><b><span class="ago" data-since="${e.at}">${fmtDur(minsSince(e.at))}</span></b>
+      <button class="btn sm" data-act="stopEntry" data-id="${e.id}">Stop</button></div></div>`).join('')}</section>`;
+}
+
 function recentHTML(list, attack) {
   if (!list.length) return '';
   const hints = attack?.hints?.treatments || {};
@@ -300,10 +317,13 @@ function recentHTML(list, attack) {
 /* ---------------------------------------------------------------- views: home */
 
 async function viewHome() {
-  const [cycles, active, learn] = await Promise.all([api('/cycles?today=' + today()), api('/attacks/active'), api('/learnings')]);
+  const [cycles, active, learn, running] = await Promise.all([api('/cycles?today=' + today()), api('/attacks/active'),
+    api('/learnings'), runningNow()]);
+  running.forEach(e => { S.entries[e.id] = e; });
   const openCycle = cycles.find(c => !c.ended_on);
   let h = pageHead('ClusterLog', null, `<a class="btn sm ghost" href="#/settings">Settings</a>`);
   if (active) h += activeBanner(active);
+  h += runningHTML(running);
   h += `<section><div class="sec-head"><h2>Cycles</h2>${cycles.length ? `<button class="btn sm" data-act="newCycle">+ New cycle</button>` : ''}</div>`;
   if (!cycles.length) {
     h += `<div class="empty"><h1>No cycles yet</h1>
@@ -345,7 +365,9 @@ async function viewLoose() { await viewLog(null); }
 
 async function viewLog(cycle) {
   const cid = cycle ? cycle.id : 'none';
-  const [j, active, recent] = await Promise.all([api('/journal?cycle_id=' + cid), api('/attacks/active'), recentSince()]);
+  const [j, active, recent, running] = await Promise.all([api('/journal?cycle_id=' + cid), api('/attacks/active'),
+    recentSince(), runningNow()]);
+  running.forEach(e => { S.entries[e.id] = e; });
   const here = active && (cycle ? active.cycle_id === cycle.id : active.cycle_id == null);
   let h = pageHead(cycle ? esc(cycle.name) : 'Outside a cycle', '#/',
     cycle ? `<button class="btn sm ghost" data-act="editCycle" data-id="${cycle.id}">Edit</button>` : '');
@@ -366,6 +388,7 @@ async function viewLog(cycle) {
       <div class="tile"><div class="num">${j.attacks.length}</div><div class="small">headaches ${cycle ? 'this cycle' : 'logged'}</div></div>
     </div>`;
   }
+  h += runningHTML(running);
   h += recentHTML(recent);
   if (cycle && cycle.ended_on) {
     h += `<section><div class="sec-head"><h2>Cycle learnings</h2><button class="btn sm ghost" data-act="editLearnings" data-id="${cycle.id}">${cycle.learnings ? 'Edit' : 'Write'}</button></div>
@@ -425,10 +448,14 @@ async function renderStats(el, cid) {
       </table></div></section>`;
   }
   if (s.treatments.length) {
-    h += `<section><h2>Treatments</h2>${s.treatments.map(t => `<div class="list-row"><div><b>${esc(t.name)}</b>
-      <div class="small muted">${t.uses} uses${t.in_attacks ? ` · ${t.in_attacks} during attacks` : ''}</div></div>
-      <div>${t.to_end.n ? `<b>${fmtDur(t.to_end.median)}</b><div class="small muted">to headache end · n=${t.to_end.n}</div>` : '<span class="muted">–</span>'}</div></div>`).join('')}
-      <p class="help">"To headache end" = median time from the first dose of that treatment to the end of the headache.</p></section>`;
+    h += `<section><h2>Treatments</h2>${s.treatments.map(t => {
+      const tag = t.treatment_id ? 'a' : 'div';
+      return `<${tag} class="list-row"${t.treatment_id ? ` href="#/med/${t.treatment_id}/${cid}"` : ''}><div><b>${esc(t.name)}</b>${t.treatment_id ? ' ›' : ''}
+      <div class="small muted">${t.uses} uses${t.in_attacks ? ` · ${t.in_attacks} during attacks` : ''}</div>
+      ${t.mode === 'duration' && t.session.n ? `<div class="small muted">median session ${fmtDur(t.session.median)} · total ${fmtDur(t.total_min)}</div>` : ''}</div>
+      <div>${t.to_end.n ? `<b>${fmtDur(t.to_end.median)}</b><div class="small muted">to headache end · n=${t.to_end.n}</div>` : '<span class="muted">–</span>'}</div></${tag}>`;
+    }).join('')}
+      <p class="help">Tap a treatment to see every time it was used. "To headache end" = median time from the first dose of that treatment to the end of the headache.</p></section>`;
   }
   el.innerHTML = h;
 }
@@ -449,7 +476,8 @@ function hourSVG(hours) {
 /* ---------------------------------------------------------------- views: attack */
 
 async function viewAttack(id) {
-  const [a, recent] = await Promise.all([api('/attacks/' + id), recentSince()]);
+  const [a, recent, sessions] = await Promise.all([api('/attacks/' + id), recentSince(), runningNow()]);
+  sessions.forEach(e => { S.entries[e.id] = e; });
   S.attack = a;
   S.attacks[a.id] = a;
   a.entries.forEach(e => { S.entries[e.id] = e; });
@@ -481,6 +509,7 @@ async function viewAttack(id) {
   const detail = [a.side && `${a.side} side`, a.locations.join(', '), a.pain_types.join(', ')].filter(Boolean).join(' · ');
   h += `<button class="list-row" data-act="editAttack" data-id="${a.id}">
     <span>${detail ? esc(detail) : '<span class="muted">Add side, location, pain type…</span>'}</span><span class="muted">Edit ›</span></button>`;
+  h += runningHTML(sessions);
   h += recentHTML(recent, a);
   h += chartSVG(a, pains);
   h += `<section><h2>Weather at start</h2>${a.weather
@@ -532,6 +561,10 @@ function chartSVG(a, pains) {
   let s = `<section><h2>Pain curve</h2><svg class="fit" viewBox="0 0 ${W} ${H}" role="img" aria-label="Pain over time">`;
   for (const k of [0, 5, 10]) s += `<line x1="${L}" x2="${W - R}" y1="${y(k)}" y2="${y(k)}" stroke="#333"/><text x="${L - 6}" y="${y(k) + 4}" fill="rgba(255,255,255,.68)" font-size="11" text-anchor="end">${k}</text>`;
   for (const e of a.entries.filter(e => e.kind === 'treatment')) {
+    if (e.mode === 'duration') {  // shaded band for the session (to now while running)
+      const stop = e.ended_at || (isRunning(e) ? nowLocal() : null);
+      if (stop) s += `<rect x="${x(e.at)}" y="${T}" width="${Math.max(1, x(stop) - x(e.at))}" height="${ph}" fill="#fff" opacity=".1"><title>${esc(e.title)} ${hhmm(e.at)}–${e.ended_at ? hhmm(e.ended_at) : 'now'}</title></rect>`;
+    }
     s += `<line x1="${x(e.at)}" x2="${x(e.at)}" y1="${T}" y2="${T + ph}" stroke="#fff" stroke-dasharray="3 3" opacity=".6"><title>${esc(e.title)} ${hhmm(e.at)}</title></line>`;
     s += `<path d="M${x(e.at)} ${T + ph - 5}l5 5-5 5-5-5z" fill="#000" stroke="#fff"/>`;
   }
@@ -586,8 +619,52 @@ async function viewTreatments() {
   setBar(`<button class="btn primary" data-act="editTreatment">+ Add treatment</button>`);
 }
 const treatmentRow = t => `<button class="list-row" data-act="editTreatment" data-id="${t.id}">
-  <span><b>${esc(t.name)}</b><span class="small muted" style="display:block">${t.uom ? 'unit: ' + esc(t.uom) : 'no unit'}${t.default_amount ? ' · default ' + esc(doseLabel(t, t.default_amount)) : ''}</span></span>
+  <span><b>${esc(t.name)}</b><span class="small muted" style="display:block">${t.mode === 'duration' ? 'start / stop · ' : ''}${t.uom ? 'unit: ' + esc(t.uom) : 'no unit'}${t.default_amount ? ' · default ' + esc(doseLabel(t, t.default_amount)) : ''}</span></span>
   <span class="small">${t.quick ? '<span class="pill">QUICK</span>' : ''}</span></button>`;
+
+/* ---------------------------------------------------------------- views: one treatment */
+
+/** Every use of one treatment within a cycle (or outside cycles), from Stats → Treatments. */
+async function viewMed(tid, scope) {
+  const [r, cycle] = await Promise.all([api(`/treatments/${tid}/log?cycle_id=${scope}&today=${today()}`),
+    /^\d+$/.test(scope) ? api('/cycles/' + scope) : null]);
+  const t = r.treatment, s = r.summary, dur = t.mode === 'duration';
+  S.tab = 'stats';  // back returns to the Stats tab
+  let h = pageHead(esc(t.name), scope === 'none' ? '#/loose' : '#/cycle/' + scope);
+  h += `<p class="muted">${cycle ? esc(cycle.name) : 'Outside a cycle'} · ${CAT_LABEL[t.category] || ''}${dur ? ' · start / stop' : ''}</p>`;
+  if (r.others.length > 1 && !r.others.some(o => o.treatment_id === t.id)) r.others.unshift({ treatment_id: t.id, name: t.name, uses: 0 });
+  if (r.others.length > 1) {
+    h += `<label class="f" for="medpick">Show</label><select id="medpick" style="margin-bottom:16px">${r.others.map(o =>
+      `<option value="${o.treatment_id}"${o.treatment_id === t.id ? ' selected' : ''}>${esc(o.name)} (${o.uses})</option>`).join('')}</select>`;
+  }
+  if (!s) {
+    app.innerHTML = h + `<div class="empty"><p>Not used here yet.</p></div>`;
+    $('#medpick')?.addEventListener('change', ev => { location.hash = `#/med/${ev.target.value}/${scope}`; });
+    return;
+  }
+  h += `<div class="tiles">
+    <div class="tile"><div class="num">${s.uses}</div><div class="small">${dur ? 'sessions' : 'uses'}</div></div>
+    <div class="tile"><div class="num">${s.in_attacks}</div><div class="small">during headaches</div></div>
+    <div class="tile"><div class="num">${fmtDur(s.to_end.median)}</div><div class="small">to headache end${s.to_end.n ? ` · n=${s.to_end.n}` : ''}</div></div>
+    ${dur ? `<div class="tile"><div class="num">${fmtDur(s.session.median)}</div><div class="small">median session${s.session.n ? ` · n=${s.session.n}` : ''}</div></div>
+      <div class="tile"><div class="num">${fmtDur(s.total_min)}</div><div class="small">total time</div></div>` : ''}
+  </div>`;
+  const byDay = new Map();
+  for (const d of r.doses.slice().reverse()) {
+    S.entries[d.id] = d;
+    if (!byDay.has(d.at.slice(0, 10))) byDay.set(d.at.slice(0, 10), []);
+    byDay.get(d.at.slice(0, 10)).push(d);
+  }
+  h += `<section><h2>Every use · newest first</h2>`;
+  for (const [day, list] of byDay) {
+    h += `<h3 class="day">${dayLabel(day)}${cycle ? ` <span class="muted">· day ${cycleDay(cycle, day)}</span>` : ''}</h3>`;
+    h += list.map(d => `<div class="jrow${d.attack_id ? ' in' : ''}" data-act="editEntry" data-id="${d.id}" role="button" tabindex="0">
+      <span class="t">${hhmm(d.at)}</span><span class="tag">${TAGS.treatment}</span><span class="txt">${entryText(d)}${d.attack_id ? `<span class="sub"><a href="#/attack/${d.attack_id}">headache #${d.attack_number ?? '?'}</a>${d.to_end != null ? ` · ended ${fmtDur(d.to_end)} later` : ''}</span>` : ''}</span></div>`).join('');
+  }
+  h += `<p class="help">Tap a row to edit it. "Ended … later" is the time from this use to the end of that headache.</p></section>`;
+  app.innerHTML = h;
+  $('#medpick')?.addEventListener('change', ev => { location.hash = `#/med/${ev.target.value}/${scope}`; });
+}
 
 /* ---------------------------------------------------------------- views: export */
 
@@ -790,13 +867,14 @@ function treatmentSheet({ cycle = null, attack = null, entry = null, recent = []
   const isEvent = entry?.kind === 'event';
   const atDefault = entry ? entry.at : nowLocal();
   const quick = entry ? [] : activeTreatments().filter(t => t.quick);
-  openSheet(entry ? (isEvent ? 'Edit event' : 'Edit dose') : 'Medication / treatment', `
-    <label class="f">When</label><input type="datetime-local" name="at" value="${atDefault}">
+  openSheet(entry ? (isEvent ? 'Edit event' : entry.mode === 'duration' ? 'Edit session' : 'Edit dose') : 'Medication / treatment', `
+    <label class="f" id="atlbl">When</label><input type="datetime-local" name="at" value="${atDefault}">
     ${quick.length ? `<label class="f">Tap to log</label><div class="stack">${quick.map(t =>
-      `<button type="submit" class="btn wide" name="quick" value="${t.id}">${esc(doseLabel(t, t.default_amount))}${t.max_per_day ? `<span class="small" style="font-weight:400">${used(t.id)}/${t.max_per_day} in 24h</span>` : ''}</button>`).join('')}</div>
+      `<button type="submit" class="btn wide" name="quick" value="${t.id}">${t.mode === 'duration' ? 'Start ' : ''}${esc(doseLabel(t, t.default_amount))}${t.max_per_day ? `<span class="small" style="font-weight:400">${used(t.id)}/${t.max_per_day} in 24h</span>` : ''}</button>`).join('')}</div>
       <label class="f" style="margin-top:32px">Or pick one and set the dose</label>` : ''}
     ${groups}
     <div class="chips" style="margin-top:16px">${opt('radio', 'treatment_id', '', 'Other / custom event…', isEvent)}</div>
+    <div id="endwrap"><label class="f">Stopped <span class="muted">(blank = still running)</span></label><input type="datetime-local" name="ended_at" value="${entry?.ended_at || ''}"></div>
     <div id="amountwrap"><label class="f">Amount <span class="muted" id="uomlbl"></span></label><input name="amount" value="${esc(entry?.amount || '')}" autocomplete="off"></div>
     <div id="titlewrap"><label class="f">Event name</label><input name="title" value="${esc(isEvent ? entry.title : '')}" placeholder="e.g. Neurologist visit, steroid taper start"></div>
     <label class="f">Notes <span class="muted">(optional)</span></label><textarea name="note" rows="3">${esc(entry?.note || '')}</textarea>
@@ -808,6 +886,8 @@ function treatmentSheet({ cycle = null, attack = null, entry = null, recent = []
         const tid = form.querySelector('input[name=treatment_id]:checked')?.value;
         const t = tid ? treatment(tid) : null;
         $('#amountwrap', form).classList.toggle('hide', !t);
+        $('#endwrap', form).classList.toggle('hide', t?.mode !== 'duration');
+        $('#atlbl', form).textContent = t?.mode === 'duration' ? 'Started' : 'When';
         $('#titlewrap', form).classList.toggle('hide', !(tid === ''));
         $('#uomlbl', form).textContent = t?.uom ? `(${t.uom})` : '';
         if (fill && t) form.amount.value = t.default_amount;
@@ -822,7 +902,8 @@ function treatmentSheet({ cycle = null, attack = null, entry = null, recent = []
       if (f.quick) body = { kind: 'treatment', treatment_id: +f.quick, amount: treatment(f.quick).default_amount, note: f.note };
       else if (f.treatment_id == null) throw new Error('Pick a treatment, or "Other / custom event"');
       else body = f.treatment_id
-        ? { kind: 'treatment', treatment_id: +f.treatment_id, amount: f.amount, note: f.note }
+        ? { kind: 'treatment', treatment_id: +f.treatment_id, amount: f.amount, note: f.note,
+            ended_at: treatment(f.treatment_id)?.mode === 'duration' ? f.ended_at || null : null }
         : { kind: 'event', title: f.title, note: f.note };
       const t = body.treatment_id && treatment(body.treatment_id);
       if (!entry && t?.max_per_day && used(t.id) >= t.max_per_day
@@ -832,7 +913,7 @@ function treatmentSheet({ cycle = null, attack = null, entry = null, recent = []
         cycle_id: entry ? entry.cycle_id : (cycle ? +cycle : null) });
       const e = await api(entry ? '/entries/' + entry.id : '/entries', { method: entry ? 'PUT' : 'POST', body });
       if (entry) toast('Saved');
-      else undoToast(`${e.title} · ${hhmm(e.at)}`, e, x => treatmentSheet({ entry: x }));
+      else undoToast(`${e.title}${isRunning(e) ? ' started' : ''} · ${hhmm(e.at)}`, e, x => treatmentSheet({ entry: x }));
     },
   });
 }
@@ -906,13 +987,16 @@ async function attackSheet(a) {
   });
 }
 
-function endAttackSheet(a) {
+async function endAttackSheet(a) {
+  const running = await runningNow();
   openSheet('End headache', `
     <label class="f">Ended at</label><input type="datetime-local" name="ended_at" value="${nowLocal()}">
+    ${running.length ? `<label class="f">Also stop <span class="muted">(leave unticked to keep going)</span></label>
+      ${running.map(e => `<div class="check"><input type="checkbox" id="stop${e.id}" name="stop_ids" value="${e.id}"><label for="stop${e.id}">${esc(e.title)} <span class="muted">· running ${fmtDur(minsSince(e.at))}</span></label></div>`).join('')}` : ''}
     <label class="f">Note <span class="muted">(optional)</span></label><input name="note" placeholder="e.g. pain gone, back to bed">`, {
     submitLabel: 'End headache',
     onSubmit: async f => {
-      await api(`/attacks/${a.id}/end`, { method: 'POST', body: f });
+      await api(`/attacks/${a.id}/end`, { method: 'POST', body: { ...f, stop_ids: (f.stop_ids || []).map(Number) } });
       S.justEnded = a.id;
     },
   });
@@ -922,6 +1006,7 @@ function treatmentEditSheet(t = null) {
   openSheet(t ? 'Edit treatment' : 'New treatment', `
     <label class="f">Name</label><input name="name" value="${esc(t?.name || '')}" placeholder="e.g. Zomig nasal spray">
     <label class="f">Category</label><div class="chips">${radios('category', CATS, t?.category || 'abortive')}</div>
+    <label class="f">Type</label><div class="chips">${radios('mode', [['dose', 'Dose (one moment)'], ['duration', 'Duration (start, then stop)']], t?.mode || 'dose')}</div>
     <div class="row"><div><label class="f">Default amount</label><input name="default_amount" value="${esc(t?.default_amount || '')}" placeholder="5"></div>
       <div><label class="f">Unit</label><input name="uom" value="${esc(t?.uom || '')}" placeholder="mg, L/min, level"></div></div>
     <div class="check"><input type="checkbox" id="pfx" name="uom_prefix" data-bool${t?.uom_prefix ? ' checked' : ''}><label for="pfx">Unit goes before the amount (e.g. "level 3")</label></div>
@@ -990,6 +1075,19 @@ const ACT = {
     location.hash = a && a.cycle_id ? '#/cycle/' + a.cycle_id : '#/loose';
   },
   endAttack: () => endAttackSheet(S.attack),
+  stopEntry: d => {
+    const e = S.entries[d.id];
+    if (!e) return;
+    const now = nowLocal();
+    openSheet(`Stop ${e.title}`, `<p class="muted">Started ${hhmm(e.at)} · running ${fmtDur(minsSince(e.at))}</p>
+      <label class="f">Stopped at</label><input type="datetime-local" name="ended_at" value="${now < e.at ? e.at : now}">`, {
+      submitLabel: 'Stop',
+      onSubmit: async f => {
+        const x = await api(`/entries/${e.id}/stop`, { method: 'POST', body: f });
+        toast(`${x.title} stopped · ${fmtDur(minsBetween(x.at, x.ended_at))}`);
+      },
+    });
+  },
   addEvent: d => addEventSheet(d),
   editTreatment: d => treatmentEditSheet(d.id ? treatment(d.id) : null),
   deleteTreatment: async d => {
@@ -1060,7 +1158,7 @@ const ACT = {
 
 document.addEventListener('click', async ev => {
   const el = ev.target.closest('[data-act]');
-  if (!el) return;
+  if (!el || el.contains(ev.target.closest('a[href]'))) return;
   const fn = ACT[el.dataset.act];
   if (!fn) return;
   ev.preventDefault();
@@ -1080,6 +1178,7 @@ const ROUTES = [
   [/^#\/loose$/, viewLoose],
   [/^#\/learnings$/, viewLearnings],
   [/^#\/treatments$/, viewTreatments],
+  [/^#\/med\/(\d+)\/(\d+|none|all)$/, viewMed],
   [/^#\/export$/, viewExport],
   [/^#\/settings$/, viewSettings],
 ];
