@@ -1,8 +1,8 @@
 # ClusterLog
 
 A self-hosted, phone-first journal for cluster headaches. Log a headache one tap
-at a time while it's happening, fix the details "in the cold light of morning",
-and download a plain-text date-range report to email to your neurologist.
+at a time while it's happening, fill in or correct the details later, and
+download a plain-text date-range report to email to your neurologist.
 
 Black background, white monospace text, big tap targets. Runs in Docker on a
 homelab box; all data is one SQLite file you own.
@@ -54,8 +54,26 @@ Tue 13 Oct 2026: 01:38 (15 L/min, 16 min, headache 5)
 
 ## Install
 
-Needs Docker with the Compose plugin (Debian:
-<https://docs.docker.com/engine/install/debian/>).
+Needs a Linux box with Docker and the Compose plugin (Debian:
+<https://docs.docker.com/engine/install/debian/>). Then, on that box:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jzalmanowitz/clusterlog/main/get.sh | bash
+```
+
+That downloads ClusterLog into `~/clusterlog` and runs `./install.sh` for you.
+Run the same line again later to **update**. Your data is never touched.
+Options go in front of `bash`, e.g. `| CLUSTERLOG_DIR=/srv/clusterlog bash`
+(folder) or `| CLUSTERLOG_PORT=9000 bash` (port, first install only).
+
+Prefer to read a script before running it?
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/jzalmanowitz/clusterlog/main/get.sh
+less get.sh && bash get.sh
+```
+
+Already have the code (e.g. a `git clone`)? Just run:
 
 ```bash
 cd clusterlog

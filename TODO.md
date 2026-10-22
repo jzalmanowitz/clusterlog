@@ -60,6 +60,10 @@ rebuild restarts the app and could interrupt logging mid-headache.
 - [ ] Off-box backups (e.g. copy `data/backups/` to a NAS on a cron).
 ## Done
 
+- 2026-10-22 — v1.3: Settings → Display: Normal / Dim (grey on black) / Auto (dim
+  22:00–07:00), charts included (IDEAS #24). One-line installer `get.sh`
+  (`curl … | bash`). Removed the "cold light of morning / rest now" wording.
+
 - 2026-10-21 — v1.2: treatments are a *dose* or a *duration* (`treatments.mode`,
   `entries.ended_at`); running sessions with Stop on home/cycle/headache screens,
   optional stop when a headache ends. Existing oxygen / cold compress / e-stim

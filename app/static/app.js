@@ -200,7 +200,7 @@ async function copyText(t) {
 /* ---------------------------------------------------------------- data helpers */
 
 async function loadTreatments() { S.treatments = await api('/treatments?include_archived=true'); }
-async function loadSettings() { S.settings = await api('/settings'); applyFontScale(S.settings.font_scale); }
+async function loadSettings() { S.settings = await api('/settings'); applyFontScale(S.settings.font_scale); applyTheme(S.settings.theme); }
 
 const FONT_SCALES = [['0.8', 'Small'], ['0.9', 'Medium'], ['1', 'Large'], ['1.15', 'Extra large']];
 /** Text size lives in settings (survives reinstalls) and localStorage (applied before the first fetch). */
@@ -210,6 +210,22 @@ function applyFontScale(v) {
   try { localStorage.setItem('fontScale', v); } catch { /* private mode */ }
 }
 try { applyFontScale(localStorage.getItem('fontScale')); } catch { /* private mode */ }
+
+const THEMES = [['normal', 'Normal'], ['dim', 'Dim'], ['auto', 'Auto (dim 22:00–07:00)']];
+let themeSetting = 'normal';
+const isDim = () => themeSetting === 'dim' || (themeSetting === 'auto' && (new Date().getHours() >= 22 || new Date().getHours() < 7));
+/** Display mode, stored like the text size. Auto is re-checked every tick so it switches at 22:00 / 07:00. */
+function applyTheme(v) {
+  if (v) {
+    themeSetting = v;
+    try { localStorage.setItem('theme', v); } catch { /* private mode */ }
+  }
+  const dim = isDim();
+  if ((document.documentElement.dataset.theme === 'dim') !== dim) {
+    if (dim) document.documentElement.dataset.theme = 'dim'; else delete document.documentElement.dataset.theme;
+  }
+}
+try { applyTheme(localStorage.getItem('theme')); } catch { /* private mode */ }
 const activeTreatments = () => S.treatments.filter(t => !t.archived);
 const treatment = id => S.treatments.find(t => t.id === +id);
 const recentSince = () => api('/recent?since=' + encodeURIComponent(addMin(nowLocal(), -24 * 60)));
@@ -422,7 +438,7 @@ async function renderChart(el, cid) {
     <div class="chart-scroll" id="chartbox"><p class="muted">Loading chart…</p></div>
     <p class="help">Each column is a day; top is midnight, bottom is midnight. ● headache start (bigger = higher peak KIP), bar = duration,
     ◇ abortive dose, ◆ preventive / emergent dose. Bottom strip: headaches per day. Week lines are cycle weeks. Scroll sideways for older days.</p>`;
-  const svg = await api(`/chart/daily.svg?cycle_id=${cid}&meds=${S.meds}&today=${today()}`);
+  const svg = await api(`/chart/daily.svg?cycle_id=${cid}&meds=${S.meds}&today=${today()}&theme=${isDim() ? 'dim' : 'dark'}`);
   const box = $('#chartbox');
   if (!box) return;
   box.innerHTML = svg;
@@ -465,11 +481,11 @@ function hourSVG(hours) {
   let s = `<svg class="fit" viewBox="0 0 ${W} ${H}" role="img" aria-label="Headaches by hour of day">`;
   hours.forEach((c, i) => {
     const h = c / mx * ph;
-    s += `<rect x="${i * bw + 1}" y="${top + ph - h}" width="${bw - 2}" height="${Math.max(h, c ? 2 : 0)}" fill="#fff"><title>${pad(i)}:00 · ${c}</title></rect>`;
-    if (c) s += `<text x="${i * bw + bw / 2}" y="${top + ph - h - 4}" fill="#fff" font-size="9" text-anchor="middle">${c}</text>`;
+    s += `<rect x="${i * bw + 1}" y="${top + ph - h}" width="${bw - 2}" height="${Math.max(h, c ? 2 : 0)}" fill="currentColor"><title>${pad(i)}:00 · ${c}</title></rect>`;
+    if (c) s += `<text x="${i * bw + bw / 2}" y="${top + ph - h - 4}" fill="currentColor" font-size="9" text-anchor="middle">${c}</text>`;
   });
   s += `<line x1="0" x2="${W}" y1="${top + ph}" y2="${top + ph}" stroke="#555"/>`;
-  for (const i of [0, 6, 12, 18]) s += `<text x="${i * bw + 1}" y="${top + ph + 16}" fill="rgba(255,255,255,.68)" font-size="11">${pad(i)}h</text>`;
+  for (const i of [0, 6, 12, 18]) s += `<text x="${i * bw + 1}" y="${top + ph + 16}" fill="currentColor" fill-opacity=".68" font-size="11">${pad(i)}h</text>`;
   return s + '</svg>';
 }
 
@@ -529,7 +545,7 @@ function endSummaryCard(a, peak) {
   return `<div class="card solid" style="margin-top:16px"><div class="card-title">Headache over</div>
     <div class="num" style="margin:8px 0">${fmtDur(minsBetween(a.started_at, a.ended_at))}</div>
     <div class="small">${peak != null ? `peak KIP ${peak}` : ''}${lines.length ? '<br>' + lines.join('<br>') : ''}</div>
-    <p class="small muted">Logged. Details can wait for the cold light of morning — rest now.</p></div>`;
+    <p class="small muted">Saved. Details can be edited any time.</p></div>`;
 }
 
 /** Side / location / pain-type fields, shared by the start and edit sheets. */
@@ -559,22 +575,22 @@ function chartSVG(a, pains) {
   const x = at => L + Math.min(1, Math.max(0, minsBetween(a.started_at, at) / total)) * pw;
   const y = k => T + ph - k / 10 * ph;
   let s = `<section><h2>Pain curve</h2><svg class="fit" viewBox="0 0 ${W} ${H}" role="img" aria-label="Pain over time">`;
-  for (const k of [0, 5, 10]) s += `<line x1="${L}" x2="${W - R}" y1="${y(k)}" y2="${y(k)}" stroke="#333"/><text x="${L - 6}" y="${y(k) + 4}" fill="rgba(255,255,255,.68)" font-size="11" text-anchor="end">${k}</text>`;
+  for (const k of [0, 5, 10]) s += `<line x1="${L}" x2="${W - R}" y1="${y(k)}" y2="${y(k)}" stroke="#333"/><text x="${L - 6}" y="${y(k) + 4}" fill="currentColor" fill-opacity=".68" font-size="11" text-anchor="end">${k}</text>`;
   for (const e of a.entries.filter(e => e.kind === 'treatment')) {
     if (e.mode === 'duration') {  // shaded band for the session (to now while running)
       const stop = e.ended_at || (isRunning(e) ? nowLocal() : null);
-      if (stop) s += `<rect x="${x(e.at)}" y="${T}" width="${Math.max(1, x(stop) - x(e.at))}" height="${ph}" fill="#fff" opacity=".1"><title>${esc(e.title)} ${hhmm(e.at)}–${e.ended_at ? hhmm(e.ended_at) : 'now'}</title></rect>`;
+      if (stop) s += `<rect x="${x(e.at)}" y="${T}" width="${Math.max(1, x(stop) - x(e.at))}" height="${ph}" fill="currentColor" opacity=".1"><title>${esc(e.title)} ${hhmm(e.at)}–${e.ended_at ? hhmm(e.ended_at) : 'now'}</title></rect>`;
     }
-    s += `<line x1="${x(e.at)}" x2="${x(e.at)}" y1="${T}" y2="${T + ph}" stroke="#fff" stroke-dasharray="3 3" opacity=".6"><title>${esc(e.title)} ${hhmm(e.at)}</title></line>`;
-    s += `<path d="M${x(e.at)} ${T + ph - 5}l5 5-5 5-5-5z" fill="#000" stroke="#fff"/>`;
+    s += `<line x1="${x(e.at)}" x2="${x(e.at)}" y1="${T}" y2="${T + ph}" stroke="currentColor" stroke-dasharray="3 3" opacity=".6"><title>${esc(e.title)} ${hhmm(e.at)}</title></line>`;
+    s += `<path d="M${x(e.at)} ${T + ph - 5}l5 5-5 5-5-5z" fill="#000" stroke="currentColor"/>`;
   }
   let d = `M${x(pains[0].at)} ${y(pains[0].kip)}`;
   for (const p of pains.slice(1)) d += ` H${x(p.at)} V${y(p.kip)}`;
   d += ` H${x(end)}`;
-  s += `<path d="${d}" fill="none" stroke="#fff" stroke-width="2.5"/>`;
-  for (const p of pains) s += `<circle cx="${x(p.at)}" cy="${y(p.kip)}" r="4" fill="#fff"><title>${hhmm(p.at)} KIP ${p.kip}</title></circle>`;
-  s += `<text x="${L}" y="${H - 8}" fill="rgba(255,255,255,.68)" font-size="11">${hhmm(a.started_at)}</text>
-    <text x="${W - R}" y="${H - 8}" fill="rgba(255,255,255,.68)" font-size="11" text-anchor="end">${a.ended_at ? hhmm(a.ended_at) : 'now'} · ${fmtDur(total)}</text>`;
+  s += `<path d="${d}" fill="none" stroke="currentColor" stroke-width="2.5"/>`;
+  for (const p of pains) s += `<circle cx="${x(p.at)}" cy="${y(p.kip)}" r="4" fill="currentColor"><title>${hhmm(p.at)} KIP ${p.kip}</title></circle>`;
+  s += `<text x="${L}" y="${H - 8}" fill="currentColor" fill-opacity=".68" font-size="11">${hhmm(a.started_at)}</text>
+    <text x="${W - R}" y="${H - 8}" fill="currentColor" fill-opacity=".68" font-size="11" text-anchor="end">${a.ended_at ? hhmm(a.ended_at) : 'now'} · ${fmtDur(total)}</text>`;
   return s + '</svg></section>';
 }
 
@@ -723,6 +739,9 @@ async function viewSettings() {
   h += `<form id="settings" novalidate>
     <section><h2>Text size</h2><div class="chips">${FONT_SCALES.map(([v, l]) =>
       `<button type="button" class="chip ${String(s.font_scale) === v ? 'on' : ''}" data-act="fontScale" data-v="${v}">${l}</button>`).join('')}</div></section>
+    <section><h2>Display</h2><div class="chips">${THEMES.map(([v, l]) =>
+      `<button type="button" class="chip ${(s.theme || 'normal') === v ? 'on' : ''}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
+      <p class="help" style="margin-top:0">Dim uses grey instead of white so the screen glares less at night.</p></section>
     <section><h2>You &amp; your neurologist</h2>
       <label class="f">Your name <span class="muted">(shown on reports)</span></label><input name="patient_name" value="${esc(s.patient_name)}" autocomplete="name">
       <label class="f">Neurologist's name <span class="muted">(shown on reports)</span></label><input name="neurologist_name" value="${esc(s.neurologist_name)}" placeholder="Dr. …">
@@ -1109,6 +1128,11 @@ const ACT = {
     const t = await api(reportQuery(exportParams(), 'text'));
     toast((await copyText(t)) ? 'Report copied — paste it into an email' : 'Copy failed — select the preview text instead');
   },
+  theme: async (d, el) => {
+    applyTheme(d.v);
+    el.parentElement.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el));
+    S.settings = await api('/settings', { method: 'PUT', body: { theme: d.v } });
+  },
   fontScale: async (d, el) => {
     applyFontScale(d.v);
     el.parentElement.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el));
@@ -1207,6 +1231,7 @@ async function refresh() {
 }
 
 function tick() {
+  applyTheme();
   document.querySelectorAll('.ago[data-since]').forEach(el => { el.textContent = fmtDur(minsSince(el.dataset.since)); });
 }
 

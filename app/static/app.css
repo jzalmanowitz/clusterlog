@@ -17,6 +17,14 @@
   --bar-h: 80px;
   color-scheme: dark;
 }
+/* Dim display (Settings → Display): grey instead of white, for night-time glare */
+:root[data-theme="dim"] {
+  --fg: #a3a3a3;
+  --body: #959595;
+  --mute: #767676;   /* ~4.7:1 on black */
+  --line: #2b2b2b;
+  --hair: #161616;
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; background: var(--bg); color: var(--fg); }
 body {
@@ -159,7 +167,7 @@ button.list-row { width: 100%; background: none; border: 0; border-bottom: 1px s
 .tile .small { color: var(--mute); }
 .chart-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 8px -16px; padding: 0 16px; }
 .chart-scroll svg { display: block; max-width: none; }
-svg.fit { width: 100%; height: auto; display: block; }
+svg.fit { width: 100%; height: auto; display: block; color: var(--fg); }
 svg text { font-family: var(--font); }
 table.t { width: 100%; border-collapse: collapse; font-size: var(--s-sm); }
 table.t th, table.t td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--hair); vertical-align: top; }
@@ -176,7 +184,7 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--fg); outline-offset: 1px; border-color: var(--fg); }
 input[type="datetime-local"], input[type="date"] { -webkit-appearance: none; appearance: none; text-align: left; }
 input[type="checkbox"] { width: 24px; height: 24px; min-height: 0; display: inline-block; vertical-align: middle;
-  accent-color: #fff; margin: 0 8px 0 0; }
+  accent-color: var(--fg); margin: 0 8px 0 0; }
 .check { display: flex; align-items: center; padding: 12px 0; }
 textarea { min-height: 120px; resize: vertical; }
 .help { font-size: var(--s-sm); color: var(--mute); margin: 8px 0 0; }

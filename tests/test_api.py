@@ -126,6 +126,11 @@ def main():
     assert call("GET", "/learnings")[0]["learnings"] == "Start verapamil week 1."
     assert call("PUT", "/settings", {"font_scale": "1.15"})["font_scale"] == "1.15"
     assert status("PUT", "/settings", {"font_scale": "9"}) == 400
+    assert call("GET", "/settings")["theme"] == "normal"
+    assert call("PUT", "/settings", {"theme": "dim"})["theme"] == "dim"
+    assert status("PUT", "/settings", {"theme": "purple"}) == 400
+    assert "#a3a3a3" in call("GET", f"/chart/daily.svg?cycle_id={c['id']}&theme=dim", raw=True)
+    call("PUT", "/settings", {"theme": "normal"})
     assert "smtp_host" not in call("GET", "/settings")
 
     # text-log import incl. New Year rollover, then backup/restore round trip

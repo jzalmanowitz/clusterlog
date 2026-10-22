@@ -141,6 +141,21 @@ with sync_playwright() as p:
     pg.click("[data-act=fontScale][data-v='0.9']")
     pg.wait_for_timeout(300)
 
+    # dim display: grey text, survives a reload
+    fg = "getComputedStyle(document.body).color"
+    assert pg.evaluate(fg) == "rgb(255, 255, 255)", (pg.evaluate(fg), pg.evaluate("document.documentElement.dataset.theme"))
+    pg.click("[data-act=theme][data-v='dim']")
+    pg.wait_for_timeout(300)
+    assert pg.evaluate("document.documentElement.dataset.theme") == "dim"
+    assert pg.evaluate(fg) == "rgb(163, 163, 163)", pg.evaluate(fg)
+    shot("10b-settings-dim")
+    pg.reload()
+    pg.wait_for_selector("#settings")
+    assert pg.evaluate("document.documentElement.dataset.theme") == "dim"
+    pg.click("[data-act=theme][data-v='normal']")
+    pg.wait_for_timeout(300)
+    assert pg.evaluate("document.documentElement.dataset.theme") is None
+
     for route in ("#/treatments", "#/learnings", "#/loose"):
         pg.goto(U + route)
         pg.wait_for_selector(".top")

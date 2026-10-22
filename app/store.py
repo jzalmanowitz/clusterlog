@@ -67,6 +67,7 @@ SETTING_DEFAULTS = {
     "lon": "",
     "place": "",
     "font_scale": "0.9",
+    "theme": "normal",   # normal (white on black) / dim (grey on black) / auto (dim 22:00-07:00)
     "pain_locations": json.dumps(DEFAULT_LOCATIONS),
     "pain_types": json.dumps(DEFAULT_PAIN_TYPES),
 }

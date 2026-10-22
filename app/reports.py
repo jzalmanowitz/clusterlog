@@ -414,7 +414,8 @@ def daily_svg(attacks, entries, d_from, d_to, cycle=None, theme="dark", meds="ke
     """Days across, time of day down. ● attack start (bigger = higher peak
     KIP) with a bar for its duration; ◇ abortive dose, ◆ preventive /
     emergent dose; bottom strip = attacks per day."""
-    fg, bg, grid, mute = ("#fff", "#000", "#3a3a3a", "#bbb") if theme == "dark" else ("#000", "#fff", "#ccc", "#444")
+    fg, bg, grid, mute = {"dark": ("#fff", "#000", "#3a3a3a", "#bbb"),
+                          "dim": ("#a3a3a3", "#000", "#2b2b2b", "#7a7a7a")}.get(theme, ("#000", "#fff", "#ccc", "#444"))
     d0, d1 = dt.date.fromisoformat(d_from), dt.date.fromisoformat(d_to)
     n = max(1, (d1 - d0).days + 1)
     dw = max(10, min(28, 640 // n))

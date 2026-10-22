@@ -21,7 +21,7 @@ import store
 import weather
 from store import bad, day, q, q1, ts, tx
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 STATIC_DIR = store.Path(__file__).parent / "static"
 
 
@@ -593,6 +593,7 @@ def report(start: str, end: str, cycle_id: Optional[str] = None,
 # ---------------------------------------------------------------- settings
 
 FONT_SCALES = ("0.8", "0.9", "1", "1.15")
+THEMES = ("normal", "dim", "auto")
 
 
 @app.get("/api/settings")
@@ -605,6 +606,8 @@ def put_settings(values: dict):
     values = dict(values)
     if "font_scale" in values and str(values["font_scale"]) not in FONT_SCALES:
         bad("Unknown text size")
+    if "theme" in values and values["theme"] not in THEMES:
+        bad("Unknown display mode")
     for k in ("lat", "lon"):
         if values.get(k) not in (None, ""):
             try:
