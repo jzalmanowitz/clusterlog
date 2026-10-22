@@ -7,6 +7,45 @@ and download a plain-text date-range report to email to your neurologist.
 Black background, white monospace text, big tap targets. Runs in Docker on a
 homelab box; all data is one SQLite file you own.
 
+## Screenshots
+
+<sub>Made-up demo data, iPhone-sized screen.</sub>
+
+<table>
+<tr>
+<td width="33%"><img src="docs/screenshots/home.png" alt="Home screen: headache in progress, oxygen and cold compress running with Stop buttons"><br><sub><b>Home</b> — headache in progress, treatments running</sub></td>
+<td width="33%"><img src="docs/screenshots/headache.png" alt="Headache screen: elapsed time, current and peak KIP, running treatments, time since each dose"><br><sub><b>During a headache</b> — KIP, running treatments, time since each dose</sub></td>
+<td width="33%"><img src="docs/screenshots/end-headache.png" alt="End headache sheet with checkboxes to also stop running treatments"><br><sub><b>End headache</b> — optionally stop oxygen / ice too</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/journal.png" alt="Cycle journal grouped by week and day"><br><sub><b>Journal</b> — by cycle week and day</sub></td>
+<td><img src="docs/screenshots/chart.png" alt="Daily chart: days across, time of day down, headaches and doses"><br><sub><b>Chart</b> — when headaches and doses happen</sub></td>
+<td><img src="docs/screenshots/stats-treatments.png" alt="Stats tab: per-week table and per-treatment summary"><br><sub><b>Stats</b> — per week and per treatment</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/med-oxygen.png" alt="Oxygen drill-in: sessions, median session, total time, every use with its headache"><br><sub><b>One treatment</b> — every use, session lengths</sub></td>
+<td colspan="2" valign="top">
+
+**Report excerpt** (plain text, for the neurologist):
+
+```text
+Oxygen: used 16 times (median session 13 min, total 3 h 50 min),
+16 during headaches; headache ended a median 50 min after the
+first dose (15 headaches).
+
+Medication log
+
+Oxygen (abortive)
+Sun 11 Oct 2026: 01:08 (15 L/min, 12 min, headache 3);
+  02:10 (15 L/min, 21 min, headache 4)
+Tue 13 Oct 2026: 01:38 (15 L/min, 16 min, headache 5)
+...
+```
+
+</td>
+</tr>
+</table>
+
 - Full requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 - What's next: [TODO.md](TODO.md)
 - Ideas to review later: [IDEAS.md](IDEAS.md)
