@@ -40,6 +40,7 @@ def main():
                                   "side": "Left", "locations": ["temple", "eye"], "pain_types": ["stabbing"],
                                   "note": "woken up"})
     assert a["number"] == 1 and a["side"] == "Left" and a["locations"] == ["temple", "eye"]
+    assert a["start_phase"] == "shadow"
     call("POST", "/entries", {"kind": "treatment", "at": "2026-02-07T23:30", "attack_id": a["id"],
                               "treatment_id": zo["id"], "amount": "5"})
     call("POST", "/entries", {"kind": "pain", "at": "2026-02-07T23:40", "attack_id": a["id"], "kip": 8, "phase": "build"})

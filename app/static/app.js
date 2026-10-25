@@ -598,7 +598,7 @@ function chartSVG(a, pains) {
 function autoPhase(a, kip) {
   const pains = a.entries.filter(e => e.kind === 'pain');
   const last = pains[pains.length - 1];
-  if (!last) return kip >= 4 ? 'onset' : 'shadow';
+  if (!last) return kip >= 4 || a.start_phase === 'onset' ? 'onset' : 'shadow';
   if (kip > last.kip) return last.phase === 'shadow' ? 'onset' : 'build';
   if (kip < last.kip) return 'subside';
   return last.phase || 'build';

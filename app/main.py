@@ -304,10 +304,10 @@ def create_attack(b: AttackIn):
         bad("Unknown phase")
     with tx() as c:
         check_cycle(c, b.cycle_id)
-        aid = c.execute("INSERT INTO attacks(cycle_id, started_at, ended_at, side, locations, pain_types, notes)"
-                        " VALUES(?,?,?,?,?,?,?)",
+        aid = c.execute("INSERT INTO attacks(cycle_id, started_at, ended_at, side, locations, pain_types, notes, start_phase)"
+                        " VALUES(?,?,?,?,?,?,?,?)",
                         (b.cycle_id, start, end, check_side(b.side), json.dumps(store.str_list(b.locations)),
-                         json.dumps(store.str_list(b.pain_types)), (b.notes or "").strip())).lastrowid
+                         json.dumps(store.str_list(b.pain_types)), (b.notes or "").strip(), b.phase or None)).lastrowid
         if b.kip is not None:
             c.execute("INSERT INTO entries(kind, at, cycle_id, attack_id, kip, phase, note)"
                       " VALUES('pain',?,?,?,?,?,?)", (start, b.cycle_id, aid, b.kip, b.phase or "shadow",
@@ -634,7 +634,8 @@ TABLES = {
     "cycles": ["id", "name", "started_on", "ended_on", "notes", "learnings", "created_at"],
     "treatments": ["id", "name", "category", "default_amount", "uom", "uom_prefix", "quick", "archived", "sort",
                    "max_per_day", "mode"],
-    "attacks": ["id", "cycle_id", "started_at", "ended_at", "side", "locations", "pain_types", "notes", "weather"],
+    "attacks": ["id", "cycle_id", "started_at", "ended_at", "side", "locations", "pain_types", "notes", "weather",
+                "start_phase"],
     "entries": ["id", "kind", "at", "cycle_id", "attack_id", "kip", "phase", "treatment_id", "amount", "title", "note",
                 "ended_at"],
 }

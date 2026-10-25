@@ -143,6 +143,7 @@ MIGRATIONS = [
            WHERE kind = 'treatment' AND ended_at IS NULL
              AND treatment_id IN (SELECT id FROM treatments WHERE mode = 'duration')
              AND (SELECT a.ended_at FROM attacks a WHERE a.id = entries.attack_id) >= at"""),
+    (7, "ALTER TABLE attacks ADD COLUMN start_phase TEXT"),  # "How did it start?", kept even without a first KIP
 ]
 
 VIEWS = """
