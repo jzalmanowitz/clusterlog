@@ -88,6 +88,8 @@ class CycleIn(BaseModel):
     ended_on: Optional[str] = None
     notes: Optional[str] = ""
     learnings: Optional[str] = ""
+    d3_schedule: Optional[str] = None   # D3 regimen loading schedule; None = maintenance only
+    d3_started_on: Optional[str] = None  # loading day 1; None = the first D3 dose logged in the cycle
 
 
 def cycle_values(b: CycleIn):
@@ -97,7 +99,11 @@ def cycle_values(b: CycleIn):
     start, end = day(b.started_on, "start date"), day(b.ended_on, "end date", False)
     if end and end < start:
         bad("End date is before start date")
-    return name, start, end, (b.notes or "").strip(), (b.learnings or "").strip()
+    if b.d3_schedule and b.d3_schedule not in store.D3_SCHEDULES:
+        bad("Unknown D3 schedule")
+    schedule = None if b.d3_schedule in (None, "", "maintenance") else b.d3_schedule
+    return (name, start, end, (b.notes or "").strip(), (b.learnings or "").strip(), schedule,
+            day(b.d3_started_on, "loading start date", False) if schedule else None)
 
 
 @app.get("/api/learnings")
@@ -120,7 +126,8 @@ def list_cycles(today: Optional[str] = None):
 @app.post("/api/cycles")
 def create_cycle(b: CycleIn):
     with tx() as c:
-        cid = c.execute("INSERT INTO cycles(name, started_on, ended_on, notes, learnings) VALUES(?,?,?,?,?)",
+        cid = c.execute("INSERT INTO cycles(name, started_on, ended_on, notes, learnings, d3_schedule, d3_started_on)"
+                        " VALUES(?,?,?,?,?,?,?)",
                         cycle_values(b)).lastrowid
     return store.get_cycle(cid)
 
@@ -134,7 +141,8 @@ def get_cycle(cid: int):
 def update_cycle(cid: int, b: CycleIn):
     get_cycle(cid)
     with tx() as c:
-        c.execute("UPDATE cycles SET name=?, started_on=?, ended_on=?, notes=?, learnings=? WHERE id=?",
+        c.execute("UPDATE cycles SET name=?, started_on=?, ended_on=?, notes=?, learnings=?, d3_schedule=?,"
+                  " d3_started_on=? WHERE id=?",
                   (*cycle_values(b), cid))
     return store.get_cycle(cid)
 
@@ -225,6 +233,149 @@ def delete_treatment(tid: int):
             return {"ok": True, "archived": True}
         c.execute("DELETE FROM treatments WHERE id=?", (tid,))
     return {"ok": True, "archived": False}
+
+
+# ---------------------------------------------------------------- D3 regimen
+
+class SupplementIn(BaseModel):
+    name: str
+    default_amount: Optional[float] = None
+    uom: Optional[str] = ""
+    target_min: Optional[float] = None
+    target_max: Optional[float] = None
+    target_note: Optional[str] = ""
+    course_days: Optional[int] = None   # e.g. 90 for B-50; None = ongoing
+    archived: bool = False
+    sort: int = 0
+
+
+def supplement_values(b: SupplementIn):
+    name = (b.name or "").strip()
+    if not name:
+        bad("Name is required")
+    for v in (b.default_amount, b.target_min, b.target_max):
+        if v is not None and v < 0:
+            bad("Amounts can't be negative")
+    if b.target_min is not None and b.target_max is not None and b.target_max < b.target_min:
+        bad("Daily maximum is below the minimum")
+    if b.course_days is not None and b.course_days < 1:
+        bad("Course length must be 1 day or more (or blank for ongoing)")
+    return (name, b.default_amount, (b.uom or "").strip(), b.target_min, b.target_max, (b.target_note or "").strip(),
+            b.course_days, int(b.archived), b.sort)
+
+
+@app.get("/api/supplements")
+def list_supplements(include_archived: bool = False):
+    return store.list_supplements(include_archived)
+
+
+@app.post("/api/supplements")
+def create_supplement(b: SupplementIn):
+    with tx() as c:
+        sid = c.execute("INSERT INTO supplements(name, default_amount, uom, target_min, target_max, target_note,"
+                        " course_days, archived, sort) VALUES(?,?,?,?,?,?,?,?,?)", supplement_values(b)).lastrowid
+    return q1("SELECT * FROM supplements WHERE id=?", (sid,))
+
+
+@app.put("/api/supplements/{sid}")
+def update_supplement(sid: int, b: SupplementIn):
+    with tx() as c:
+        n = c.execute("UPDATE supplements SET name=?, default_amount=?, uom=?, target_min=?, target_max=?, target_note=?,"
+                      " course_days=?, archived=?, sort=? WHERE id=?", (*supplement_values(b), sid)).rowcount
+    if not n:
+        bad("Supplement not found", 404)
+    return q1("SELECT * FROM supplements WHERE id=?", (sid,))
+
+
+@app.delete("/api/supplements/{sid}")
+def delete_supplement(sid: int):
+    """Supplements already logged are archived instead, like treatments. Vitamin D3 can only be archived."""
+    with tx() as c:
+        s = c.execute("SELECT role FROM supplements WHERE id=?", (sid,)).fetchone() or bad("Supplement not found", 404)
+        if s["role"] or c.execute("SELECT 1 FROM supplement_items WHERE supplement_id=? LIMIT 1", (sid,)).fetchone():
+            c.execute("UPDATE supplements SET archived=1 WHERE id=?", (sid,))
+            return {"ok": True, "archived": True}
+        c.execute("DELETE FROM supplements WHERE id=?", (sid,))
+    return {"ok": True, "archived": False}
+
+
+class SupplementItemIn(BaseModel):
+    supplement_id: int
+    amount: Optional[float] = None
+    source: str = "supplement"      # or "food"
+    loading: bool = False           # the four-week schedule's weekly 50,000 IU D3 dose
+
+
+class SupplementLogIn(BaseModel):
+    at: str
+    cycle_id: Optional[int] = None
+    note: Optional[str] = ""
+    items: list[SupplementItemIn] = []
+
+
+def supplement_log_rows(c, b: SupplementLogIn):
+    at = ts(b.at)
+    check_cycle(c, b.cycle_id)
+    if not b.items:
+        bad("Tick at least one supplement")
+    rows = []
+    for it in b.items:
+        s = c.execute("SELECT * FROM supplements WHERE id=?", (it.supplement_id,)).fetchone() or bad("Supplement not found")
+        if it.source not in store.SOURCES:
+            bad("Source must be supplement or food")
+        if it.amount is not None and it.amount < 0:
+            bad(f"{s['name']}: amount can't be negative")
+        if it.loading and s["role"] != "d3":
+            bad("Only Vitamin D3 has a loading dose")
+        rows.append((s["id"], s["name"], it.amount, s["uom"], it.source, int(it.loading)))
+    return at, rows
+
+
+def get_supplement_log(lid):
+    l = q1("SELECT * FROM supplement_logs WHERE id=?", (lid,)) or bad("Supplement log not found", 404)
+    l["items"] = q("""SELECT i.*, s.role FROM supplement_items i LEFT JOIN supplements s ON s.id = i.supplement_id
+                      WHERE i.log_id=? ORDER BY i.id""", (lid,))
+    return l
+
+
+def write_supplement_items(c, lid, rows):
+    c.execute("DELETE FROM supplement_items WHERE log_id=?", (lid,))
+    for r in rows:
+        c.execute("INSERT INTO supplement_items(log_id, supplement_id, name, amount, uom, source, loading)"
+                  " VALUES(?,?,?,?,?,?,?)", (lid, *r))
+
+
+@app.post("/api/supplement-logs")
+def create_supplement_log(b: SupplementLogIn):
+    with tx() as c:
+        at, rows = supplement_log_rows(c, b)
+        lid = c.execute("INSERT INTO supplement_logs(at, cycle_id, note) VALUES(?,?,?)",
+                        (at, b.cycle_id, (b.note or "").strip())).lastrowid
+        write_supplement_items(c, lid, rows)
+    return get_supplement_log(lid)
+
+
+@app.put("/api/supplement-logs/{lid}")
+def update_supplement_log(lid: int, b: SupplementLogIn):
+    get_supplement_log(lid)
+    with tx() as c:
+        at, rows = supplement_log_rows(c, b)
+        c.execute("UPDATE supplement_logs SET at=?, cycle_id=?, note=? WHERE id=?", (at, b.cycle_id, (b.note or "").strip(), lid))
+        write_supplement_items(c, lid, rows)
+    return get_supplement_log(lid)
+
+
+@app.delete("/api/supplement-logs/{lid}")
+def delete_supplement_log(lid: int):
+    with tx() as c:
+        c.execute("DELETE FROM supplement_logs WHERE id=?", (lid,))  # items cascade
+    return {"ok": True}
+
+
+@app.get("/api/regimen")
+def regimen(date: str, cycle_id: Optional[int] = None, exclude_log: Optional[int] = None):
+    """Schedule position and the day's running totals, for the Track D3 Regimen sheet."""
+    return store.regimen_today(cycle_id, day(date), exclude_log)
 
 
 # ---------------------------------------------------------------- attacks
@@ -533,8 +684,10 @@ def delete_entry(eid: int):
 
 @app.get("/api/journal")
 def journal(cycle_id: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None):
-    attacks, entries = store.load(cycle_id, day(start, required=False), day(end, required=False))
-    return {"attacks": attacks, "entries": entries}
+    d_from, d_to = day(start, required=False), day(end, required=False)
+    attacks, entries = store.load(cycle_id, d_from, d_to)
+    return {"attacks": attacks, "entries": entries,
+            "supplement_logs": store.load_supplement_logs(cycle_id, d_from, d_to)}
 
 
 @app.get("/api/recent")
@@ -559,7 +712,10 @@ def stats(cycle_id: Optional[str] = None, start: Optional[str] = None, end: Opti
     d_from, d_to = day(start, required=False), day(end, required=False)
     attacks, entries = store.load(cycle_id, d_from, d_to)
     cycle = store.get_cycle(int(cycle_id)) if cycle_id and cycle_id.isdigit() else None
-    return store.compute_stats(attacks, entries, d_from, d_to, cycle, day(today, required=False))
+    today = day(today, required=False)
+    s = store.compute_stats(attacks, entries, d_from, d_to, cycle, today)
+    s["regimen"] = store.regimen_stats(cycle_id, d_from, d_to, today)
+    return s
 
 
 @app.get("/api/chart/daily.svg")
@@ -631,13 +787,18 @@ def geocode(name: str):
 # ---------------------------------------------------------------- backup / restore / import
 
 TABLES = {
-    "cycles": ["id", "name", "started_on", "ended_on", "notes", "learnings", "created_at"],
+    "cycles": ["id", "name", "started_on", "ended_on", "notes", "learnings", "created_at", "d3_schedule",
+               "d3_started_on"],
     "treatments": ["id", "name", "category", "default_amount", "uom", "uom_prefix", "quick", "archived", "sort",
                    "max_per_day", "mode"],
     "attacks": ["id", "cycle_id", "started_at", "ended_at", "side", "locations", "pain_types", "notes", "weather",
                 "start_phase"],
     "entries": ["id", "kind", "at", "cycle_id", "attack_id", "kip", "phase", "treatment_id", "amount", "title", "note",
                 "ended_at"],
+    "supplements": ["id", "name", "default_amount", "uom", "target_min", "target_max", "target_note", "course_days",
+                    "role", "archived", "sort"],
+    "supplement_logs": ["id", "at", "cycle_id", "note"],
+    "supplement_items": ["id", "log_id", "supplement_id", "name", "amount", "uom", "source", "loading"],
 }
 
 
@@ -661,8 +822,10 @@ async def restore(request: Request):
         bad("That doesn't look like a ClusterLog backup")
     safety = make_backup("pre-restore")
     with tx() as c:
-        for t in ("entries", "attacks", "treatments", "cycles"):
+        for t in ("supplement_items", "supplement_logs", "entries", "attacks", "treatments", "cycles"):
             c.execute(f"DELETE FROM {t}")
+        if "supplements" in data:  # backups from before 1.4 keep the seeded supplement list
+            c.execute("DELETE FROM supplements")
         for t, cols in TABLES.items():
             for row in data.get(t) or []:
                 keys = [k for k in cols if k in row]

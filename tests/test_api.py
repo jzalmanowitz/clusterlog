@@ -122,6 +122,8 @@ def main():
     assert csv_t.startswith("date,time,cycle,headache") and "2026-02-09 03:40,38" in csv_t, csv_t
     assert status("POST", "/report/email", {}) in (404, 405), "in-app email should be gone"
 
+    regimen_checks()
+
     # learnings, settings, text size
     call("PUT", f"/cycles/{c['id']}", {**c, "ended_on": "2026-03-20", "learnings": "Start verapamil week 1."})
     assert call("GET", "/learnings")[0]["learnings"] == "Start verapamil week 1."
@@ -144,7 +146,107 @@ def main():
     assert next(t for t in data["treatments"] if t["name"] == "Oxygen")["mode"] == "duration"
     counts = call("POST", "/restore", data)["counts"]
     assert counts["attacks"] == 3 and call("GET", "/settings")["pain_types"], "restore must keep option lists"
+    assert counts["supplement_logs"] == 4 and counts["supplement_items"] == 9, counts
+    assert len(call("GET", "/supplements?include_archived=true")) == 10
     print("API tests passed")
+
+
+def regimen_checks():
+    """D3 regimen: loading schedules per cycle, additive daily totals, food, B-50 course, report, no chart."""
+    sup = {s["name"]: s for s in call("GET", "/supplements")}
+    d3, om, mg, b50, zn = (sup[n] for n in ("Vitamin D3", "Omega 3 fish oil", "Magnesium", "Vitamin B-50", "Zinc"))
+    assert len(sup) == 10 and d3["role"] == "d3" and b50["course_days"] == 90 and om["target_max"] == 2400
+
+    c2 = call("POST", "/cycles", {"name": "Spring", "started_on": "2026-04-01", "ended_on": "2026-04-03",
+                                  "d3_schedule": "two_week"})
+    assert c2["d3_schedule"] == "two_week"
+    assert status("POST", "/cycles", {"name": "x", "started_on": "2026-04-01", "d3_schedule": "weekly"}) == 400
+    r = call("GET", f"/regimen?date=2026-04-02&cycle_id={c2['id']}")
+    assert r["d3"]["target"] == 50000 and r["d3"]["until_maintenance"] == 13 and r["d3"]["day"] is None, r["d3"]
+
+    item = lambda s, amt, **k: {"supplement_id": s["id"], "amount": amt, **k}
+    call("POST", "/supplement-logs", {"at": "2026-04-02T08:00", "cycle_id": c2["id"], "items": [
+        item(d3, 30000), item(om, 1000), item(mg, 200, source="food"), item(b50, 1)]})
+    r = call("GET", f"/regimen?date=2026-04-02&cycle_id={c2['id']}")
+    row = {s["name"]: s for s in r["supplements"]}
+    assert r["d3"]["day"] == 1 and row["Vitamin D3"]["remaining"] == 20000 and not row["Vitamin D3"]["met"]
+    assert row["Vitamin B-50"]["course"]["days_left"] == 90
+    second = call("POST", "/supplement-logs", {"at": "2026-04-02T20:00", "cycle_id": c2["id"], "note": "with dinner",
+                                               "items": [item(d3, 20000), item(mg, 200)]})
+    row = {s["name"]: s for s in call("GET", f"/regimen?date=2026-04-02&cycle_id={c2['id']}")["supplements"]}
+    assert row["Vitamin D3"]["met"] and row["Magnesium"]["taken"] == 400 and row["Magnesium"]["food"] == 200
+    assert row["Magnesium"]["met"] and not row["Zinc"]["met"]
+    # editing a log: the sheet's totals leave out the log being edited
+    r = call("GET", f"/regimen?date=2026-04-02&cycle_id={c2['id']}&exclude_log={second['id']}")
+    assert next(s for s in r["supplements"] if s["name"] == "Vitamin D3")["taken"] == 30000
+    assert call("PUT", f"/supplement-logs/{second['id']}", {"at": "2026-04-02T21:00", "cycle_id": c2["id"], "note": "with dinner",
+                "items": [item(d3, 20000), item(mg, 200)]})["at"] == "2026-04-02T21:00"
+    d = call("GET", f"/regimen?date=2026-04-09&cycle_id={c2['id']}")["d3"]
+    assert (d["day"], d["target"], d["phase"], d["until_maintenance"]) == (8, 40000, "Loading week 2", 6), d
+    d = call("GET", f"/regimen?date=2026-04-15&cycle_id={c2['id']}")["d3"]
+    assert (d["target"], d["phase"]) == (10000, "Maintenance"), d
+    assert call("GET", "/regimen?date=2026-04-02")["d3"]["target"] == 10000, "outside a cycle = maintenance"
+    row = {s["name"]: s for s in call("GET", "/regimen?date=2026-05-01")["supplements"]}
+    assert row["Vitamin B-50"]["course"]["days_left"] == 61
+
+    assert status("POST", "/supplement-logs", {"at": "2026-04-02T09:00", "items": []}) == 400
+    assert status("POST", "/supplement-logs", {"at": "2026-04-02T09:00", "items": [item(zn, 10, loading=True)]}) == 400
+    assert status("POST", "/supplement-logs", {"at": "2026-04-02T09:00", "items": [item(zn, 10, source="pill")]}) == 400
+
+    # loading started later than the first D3 dose: earlier days count as maintenance
+    late = call("POST", "/cycles", {"name": "Late", "started_on": "2026-08-01", "ended_on": "2026-08-12",
+                                    "d3_schedule": "two_week"})
+    call("POST", "/supplement-logs", {"at": "2026-08-01T07:15", "cycle_id": late["id"], "items": [item(d3, 11000)]})
+    call("PUT", f"/cycles/{late['id']}", {**late, "d3_started_on": "2026-08-10"})
+    d = call("GET", f"/regimen?date=2026-08-01&cycle_id={late['id']}")["d3"]
+    assert (d["target"], d["phase"]) == (10000, "Before loading"), d
+    d = call("GET", f"/regimen?date=2026-08-11&cycle_id={late['id']}")["d3"]
+    assert (d["day"], d["target"], d["until_maintenance"]) == (2, 50000, 12), d
+    assert call("GET", f"/stats?cycle_id={late['id']}")["regimen"]["status"]["day"] == 3
+    call("DELETE", f"/cycles/{late['id']}")
+
+    # four-week schedule: 20,000 IU a day plus one 50,000 IU loading dose a week
+    c3 = call("POST", "/cycles", {"name": "Summer", "started_on": "2026-06-01", "ended_on": "2026-06-08",
+                                  "d3_schedule": "four_week"})
+    call("POST", "/supplement-logs", {"at": "2026-06-01T08:00", "cycle_id": c3["id"],
+                                      "items": [item(d3, 20000), item(d3, 50000, loading=True)]})
+    r = call("GET", f"/regimen?date=2026-06-01&cycle_id={c3['id']}")
+    assert r["d3"]["weekly_loading"] and r["d3"]["loading_taken"] and r["d3"]["until_maintenance"] == 28
+    assert next(s for s in r["supplements"] if s["role"] == "d3")["met"]
+    r = call("GET", f"/regimen?date=2026-06-08&cycle_id={c3['id']}")
+    assert r["d3"]["loading_week"] == 2 and not r["d3"]["loading_taken"]
+    g = call("GET", f"/stats?cycle_id={c3['id']}")["regimen"]
+    assert g["loading_doses"] == {"taken": 1, "expected": 2} and g["days"] == 8, g
+
+    # stats, journal, chart, report
+    g = call("GET", f"/stats?cycle_id={c2['id']}")["regimen"]
+    assert g["days"] == 2 and g["complete_days"] == 0 and g["schedule_label"] == "Two-week loading", g
+    dd = next(p for p in g["supplements"] if p["name"] == "Vitamin D3")
+    assert (dd["days_met"], dd["days_expected"], dd["total"]) == (1, 2, 50000), dd
+    j = call("GET", f"/journal?cycle_id={c2['id']}")
+    assert len(j["supplement_logs"]) == 2 and j["supplement_logs"][1]["note"] == "with dinner"
+    assert "Vitamin" not in call("GET", f"/chart/daily.svg?cycle_id={c2['id']}&meds=all", raw=True)
+    t = call("GET", f"/report?start=2026-04-01&end=2026-04-03&cycle_id={c2['id']}&format=text", raw=True)
+    assert "\nD3 regimen\n" in t and "Schedule: Spring: Two-week loading, loading started Thu 02 Apr 2026, " \
+           "maintenance (10,000 IU a day) from Wed 15 Apr 2026." in t, t
+    assert "Thu 02 Apr 2026, loading week 1, D3 target 50,000 IU: Vitamin D3 50,000 IU; " in t, t
+    assert "Magnesium 400 mg (200 from food)" in t and "Missed: Calcium citrate" in t, t
+    assert "Fri 03 Apr 2026, loading week 1, D3 target 50,000 IU: nothing recorded. Missed: Vitamin D3, " in t, t
+    for bad in ("|", "#", "<", "·"):
+        assert bad not in t, f"plain report contains {bad!r}"
+    assert "<h2>D3 regimen</h2>" in call("GET", f"/report?start=2026-04-01&end=2026-04-03&format=html", raw=True)
+    assert ",supplement,,,Vitamin D3,30000 IU," in call("GET", "/report?start=2026-04-01&end=2026-04-03&format=csv", raw=True)
+
+    # add / remove supplements: logged ones (and D3) are archived, unused ones deleted
+    new = call("POST", "/supplements", {"name": "Vitamin C", "default_amount": 500, "uom": "mg", "target_min": 500})
+    assert call("DELETE", f"/supplements/{new['id']}")["archived"] is False
+    assert call("DELETE", f"/supplements/{zn['id']}")["archived"] is False
+    assert call("DELETE", f"/supplements/{mg['id']}")["archived"] is True
+    assert call("DELETE", f"/supplements/{d3['id']}")["archived"] is True
+    call("PUT", f"/supplements/{d3['id']}", {**d3, "archived": False})
+    call("PUT", f"/supplements/{mg['id']}", {**mg, "archived": False})
+    assert status("POST", "/supplements", {"name": "x", "target_min": 5, "target_max": 1}) == 400
+    call("POST", "/supplements", {"name": "Zinc", "default_amount": 10, "uom": "mg", "target_min": 10})
 
 
 if __name__ == "__main__":

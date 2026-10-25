@@ -60,6 +60,30 @@ SEED_TREATMENTS = [
 ]
 DURATION_SEEDS = tuple(t[0] for t in SEED_TREATMENTS if t[6] == "duration")
 
+# D3 regimen: name, default_amount, uom, target_min, target_max, target_note, course_days, role
+SEED_SUPPLEMENTS = [
+    ("Vitamin D3", 10000, "IU", 10000, None, "", None, "d3"),
+    ("Omega 3 fish oil", 1000, "mg", 1000, 2400, "at least EPA 360 mg and DHA 240 mg a day", None, ""),
+    ("Calcium citrate", 220, "mg", 220, 500, "", None, ""),
+    ("Magnesium", 400, "mg", 400, 500, "malate, glycinate or citrate", None, ""),
+    ("Vitamin K2 (MK-7)", 200, "mcg", 200, None, "MK-7 preferred for its longer half-life", None, ""),
+    ("Vitamin K2 (MK-4)", 1000, "mcg", 1000, None, "", None, ""),
+    ("Vitamin A", 900, "mcg", 900, None, "900 mcg (3,000 IU) for men, 700 mcg (2,333 IU) for women", None, ""),
+    ("Vitamin B-50", 1, "capsule", 1, None, "three months only; a mature multivitamin covers it after that", 90, ""),
+    ("Zinc", 10, "mg", 10, None, "", None, ""),
+    ("Boron", 1, "mg", 1, None, "", None, ""),
+]
+D3_SCHEDULES = {
+    "maintenance": "Maintenance only",
+    "two_week": "Two-week loading",
+    "four_week": "Four-week loading",
+}
+D3_MAINTENANCE = 10000
+D3_LOADING_DOSE = 50000            # four-week schedule: one extra dose a week in weeks 1 and 2
+D3_LOAD_DAYS = {"two_week": 13, "four_week": 28}   # last loading day; maintenance starts the day after
+SOURCES = ("supplement", "food")
+COURSE_GAP_DAYS = 30               # a longer break restarts a supplement's course countdown
+
 SETTING_DEFAULTS = {
     "patient_name": "",
     "neurologist_name": "",
@@ -144,6 +168,38 @@ MIGRATIONS = [
              AND treatment_id IN (SELECT id FROM treatments WHERE mode = 'duration')
              AND (SELECT a.ended_at FROM attacks a WHERE a.id = entries.attack_id) >= at"""),
     (7, "ALTER TABLE attacks ADD COLUMN start_phase TEXT"),  # "How did it start?", kept even without a first KIP
+    # v1.4: D3 regimen tracker. Supplements are separate from treatments so they never reach the chart,
+    # headache timelines or treatment stats.
+    (8, """CREATE TABLE IF NOT EXISTS supplements (
+           id INTEGER PRIMARY KEY,
+           name TEXT NOT NULL,
+           default_amount REAL,
+           uom TEXT NOT NULL DEFAULT '',
+           target_min REAL,                       -- daily target; the day counts as met at or above this
+           target_max REAL,
+           target_note TEXT NOT NULL DEFAULT '',
+           course_days INTEGER,                   -- e.g. B-50: 90 days, counted from the first dose
+           role TEXT NOT NULL DEFAULT '',         -- 'd3': daily target comes from the cycle's loading schedule
+           archived INTEGER NOT NULL DEFAULT 0,
+           sort INTEGER NOT NULL DEFAULT 0)"""),
+    (9, """CREATE TABLE IF NOT EXISTS supplement_logs (
+           id INTEGER PRIMARY KEY,
+           at TEXT NOT NULL,
+           cycle_id INTEGER REFERENCES cycles(id) ON DELETE SET NULL,
+           note TEXT NOT NULL DEFAULT '')"""),
+    (10, """CREATE TABLE IF NOT EXISTS supplement_items (
+           id INTEGER PRIMARY KEY,
+           log_id INTEGER NOT NULL REFERENCES supplement_logs(id) ON DELETE CASCADE,
+           supplement_id INTEGER REFERENCES supplements(id) ON DELETE SET NULL,
+           name TEXT NOT NULL,
+           amount REAL,
+           uom TEXT NOT NULL DEFAULT '',
+           source TEXT NOT NULL DEFAULT 'supplement',   -- 'supplement' or 'food'
+           loading INTEGER NOT NULL DEFAULT 0)"""),    # four-week schedule's weekly 50,000 IU D3 dose
+    (11, "ALTER TABLE cycles ADD COLUMN d3_schedule TEXT"),  # two_week / four_week / maintenance (NULL)
+    (12, "CREATE INDEX IF NOT EXISTS idx_supplement_logs_at ON supplement_logs(at)"),
+    (13, "CREATE INDEX IF NOT EXISTS idx_supplement_items_log ON supplement_items(log_id)"),
+    (14, "ALTER TABLE cycles ADD COLUMN d3_started_on TEXT"),  # loading day 1; NULL = first D3 dose in the cycle
 ]
 
 VIEWS = """
@@ -215,6 +271,12 @@ def init_db():
                             "INSERT INTO treatments(name,category,default_amount,uom,uom_prefix,quick,mode,sort)"
                             " VALUES(?,?,?,?,?,?,?,?)", (*t, i * 10))
                 c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('seeded','1')")
+            if not c.execute("SELECT value FROM settings WHERE key='supplements_seeded'").fetchone():
+                if c.execute("SELECT COUNT(*) FROM supplements").fetchone()[0] == 0:
+                    for i, t in enumerate(SEED_SUPPLEMENTS):
+                        c.execute("INSERT INTO supplements(name, default_amount, uom, target_min, target_max,"
+                                  " target_note, course_days, role, sort) VALUES(?,?,?,?,?,?,?,?,?)", (*t, i * 10))
+                c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('supplements_seeded','1')")
             # v1.1: in-app email removed — drop stored SMTP credentials
             c.execute("DELETE FROM settings WHERE key LIKE 'smtp_%' OR key = 'recipient'")
             # re-fetch weather snapshots from older formats (v1.0.1 sea-level pressure, v1.1 6-hour trend)
@@ -555,3 +617,264 @@ def history_hints(exclude=None):
         "duration": summarize([minutes(a["started_at"], a["ended_at"]) for a in done]),
         "treatments": {str(k): summarize(v) for k, v in per.items()},
     }
+
+
+# ---------------------------------------------------------------- D3 regimen
+
+def fmt_amount(v):
+    """10000 -> '10,000' · 2.5 -> '2.5' · None -> ''."""
+    if v is None:
+        return ""
+    v = float(v)
+    return f"{v:,.0f}" if v == int(v) else f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
+def supplement_target(s):
+    """'1,000 to 2,400 mg' · '10 mg' · ''."""
+    lo, hi, uom = s.get("target_min"), s.get("target_max"), s.get("uom") or ""
+    if lo is None and hi is None:
+        return ""
+    if lo is not None and hi is not None and hi != lo:
+        return f"{fmt_amount(lo)} to {fmt_amount(hi)} {uom}".strip()
+    return f"{fmt_amount(lo if lo is not None else hi)} {uom}".strip()
+
+
+def d3_plan(schedule, n):
+    """D3 target for day n of a cycle's regimen (day 1 = first D3 dose in the cycle; None = not started yet)."""
+    schedule = schedule if schedule in D3_SCHEDULES else "maintenance"
+    k = n or 1
+    out = {"schedule": schedule, "schedule_label": D3_SCHEDULES[schedule], "day": n, "target": D3_MAINTENANCE,
+           "phase": "Maintenance", "weekly_loading": False, "loading_week": None, "until_maintenance": 0}
+    load = D3_LOAD_DAYS.get(schedule)
+    if not load or k > load:
+        return out
+    week = (k - 1) // 7 + 1
+    out.update(phase=f"Loading week {week}", until_maintenance=load + 1 - k)
+    if schedule == "two_week":
+        out["target"] = 50000 if week == 1 else 40000
+    else:
+        out["target"] = 20000 if week <= 2 else 15000
+        out.update(weekly_loading=week <= 2, loading_week=week)
+    return out
+
+
+def regimen_starts():
+    """cycle id -> day 1 of its loading schedule: the cycle's 'loading started on' date if set,
+    else the date of the first D3 dose logged in that cycle."""
+    out = {r["cycle_id"]: r["first"] for r in q(
+        """SELECT l.cycle_id, MIN(substr(l.at, 1, 10)) AS first FROM supplement_logs l
+           JOIN supplement_items i ON i.log_id = l.id JOIN supplements s ON s.id = i.supplement_id
+           WHERE s.role = 'd3' AND l.cycle_id IS NOT NULL GROUP BY l.cycle_id""")}
+    out.update({r["id"]: r["d3_started_on"] for r in q("SELECT id, d3_started_on FROM cycles WHERE d3_started_on IS NOT NULL")})
+    return out
+
+
+def plan_for(schedule, start, date):
+    """d3_plan for a date; days before the loading start (e.g. maintenance doses already taken) count as maintenance."""
+    if start and date < start:
+        return dict(d3_plan("maintenance", None), phase="Before loading")
+    return d3_plan(schedule, regimen_day_n(start, date))
+
+
+def regimen_day_n(start, date):
+    return (dt.date.fromisoformat(date) - dt.date.fromisoformat(start)).days + 1 if start and start <= date else None
+
+
+def course_windows(course_days):
+    """supplement id -> [(start, end)] courses of a limited-time supplement (e.g. B-50 for 90 days).
+    Each course starts at the first dose after a break of more than COURSE_GAP_DAYS."""
+    out = {}
+    rows = q("""SELECT DISTINCT i.supplement_id AS sid, substr(l.at, 1, 10) AS d FROM supplement_items i
+                JOIN supplement_logs l ON l.id = i.log_id WHERE i.supplement_id IN (%s) ORDER BY sid, d"""
+             % ",".join("?" * len(course_days)), tuple(course_days)) if course_days else []
+    last = {}
+    for r in rows:
+        sid, d = r["sid"], dt.date.fromisoformat(r["d"])
+        if sid not in last or (d - last[sid]).days > COURSE_GAP_DAYS:
+            out.setdefault(sid, []).append((d, d + dt.timedelta(days=course_days[sid] - 1)))
+        last[sid] = d
+    return out
+
+
+def course_state(windows, date):
+    """{'start', 'end', 'days_left'} of the course covering `date` (or the last one before it); None if never started."""
+    d = dt.date.fromisoformat(date)
+    past = [w for w in windows or [] if w[0] <= d]
+    if not past:
+        return None
+    start, end = past[-1]
+    return {"start": start.isoformat(), "end": end.isoformat(), "days_left": max(0, (end - d).days + 1)}
+
+
+def list_supplements(include_archived=True):
+    w = "" if include_archived else " WHERE archived = 0"
+    return q(f"SELECT * FROM supplements{w} ORDER BY archived, sort, name")
+
+
+def load_supplement_logs(cycle_id=None, d_from=None, d_to=None, date=None):
+    """Supplement logs (each with its items), oldest first. `date` = every log on that day, any cycle."""
+    if date:
+        w, a = " WHERE substr(at, 1, 10) = ?", [date]
+    else:
+        w, a = scope(cycle_id, d_from, d_to, "at")
+    logs = q(f"SELECT * FROM supplement_logs{w} ORDER BY at, id", a)
+    by_id = {l["id"]: dict(l, items=[]) for l in logs}
+    if by_id:
+        for it in q(f"""SELECT i.*, s.role FROM supplement_items i LEFT JOIN supplements s ON s.id = i.supplement_id
+                        WHERE i.log_id IN ({",".join("?" * len(by_id))}) ORDER BY i.id""", tuple(by_id)):
+            by_id[it["log_id"]]["items"].append(it)
+    return list(by_id.values())
+
+
+def item_key(it):
+    return str(it["supplement_id"]) if it["supplement_id"] else "n:" + it["name"]
+
+
+def day_totals(logs):
+    """date -> item key -> {'name', 'uom', 'total', 'food', 'loading'}."""
+    out = {}
+    for l in logs:
+        for it in l["items"]:
+            r = out.setdefault(l["at"][:10], {}).setdefault(item_key(it), {
+                "name": it["name"], "uom": it["uom"], "total": 0.0, "food": 0.0, "loading": 0.0})
+            amt = it["amount"] or 0
+            r["total"] += amt
+            if it["source"] == "food":
+                r["food"] += amt
+            if it["loading"]:
+                r["loading"] += amt
+    return out
+
+
+def regimen_today(cycle_id, date, exclude_log=None):
+    """What the Track D3 Regimen sheet shows: today's schedule position and running totals against each target."""
+    cycle = get_cycle(cycle_id) if cycle_id else None
+    start = regimen_starts().get(cycle["id"]) if cycle else None
+    plan = plan_for(cycle["d3_schedule"] if cycle else "maintenance", start, date)
+    if cycle and not start and plan["schedule"] != "maintenance":
+        plan["until_maintenance"] = D3_LOAD_DAYS[plan["schedule"]]
+    logs = [l for l in load_supplement_logs(date=date) if l["id"] != exclude_log]
+    totals = day_totals(logs).get(date, {})
+    if plan["weekly_loading"]:
+        ws = (dt.date.fromisoformat(start or date) + dt.timedelta(days=(plan["loading_week"] - 1) * 7)).isoformat()
+        we = (dt.date.fromisoformat(ws) + dt.timedelta(days=6)).isoformat()
+        plan["loading_taken"] = bool(q1(
+            """SELECT 1 FROM supplement_items i JOIN supplement_logs l ON l.id = i.log_id
+               WHERE i.loading = 1 AND l.cycle_id IS ? AND substr(l.at, 1, 10) BETWEEN ? AND ? AND l.id IS NOT ?""",
+            (cycle_id, ws, we, exclude_log)))
+    sups = list_supplements()
+    windows = course_windows({s["id"]: s["course_days"] for s in sups if s["course_days"]})
+    out = []
+    for s in sups:
+        t = totals.get(str(s["id"]), {})
+        if s["role"] == "d3":
+            s = dict(s, target_min=plan["target"], target_max=None)
+        taken = t.get("total", 0.0) - (t.get("loading", 0.0) if s["role"] == "d3" else 0)
+        course = course_state(windows.get(s["id"]), date) if s["course_days"] else None
+        if s["archived"] and not t:
+            continue
+        out.append({**s, "target": supplement_target(s), "taken": t.get("total", 0.0), "food": t.get("food", 0.0),
+                    "met": s["target_min"] is not None and taken >= s["target_min"] - 1e-9,
+                    "remaining": max(0.0, (s["target_min"] or 0) - taken), "course": course})
+    return {"date": date, "cycle_id": cycle_id, "d3": plan, "supplements": out, "logs": len(logs)}
+
+
+def regimen_stats(cycle_id, d_from, d_to, today=None, daily=False):
+    """Adherence for Stats and the report: per-supplement days at target, and optionally a per-day summary.
+    The range runs from the first logged dose in scope (or d_from, if later) to d_to, capped at today."""
+    today = today or dt.date.today().isoformat()
+    logs = load_supplement_logs(cycle_id, d_from, d_to)
+    cycles = {c["id"]: c for c in q("SELECT * FROM cycles")}
+    cycle = cycles.get(int(cycle_id)) if cycle_id and str(cycle_id).isdigit() else None
+    starts = regimen_starts()
+    out = {"schedule": (cycle["d3_schedule"] or "maintenance") if cycle else None, "days": 0, "complete_days": 0,
+           "supplements": [], "daily": [], "status": None, "loading_doses": None, "scope": cycle_id,
+           "cycle_ids": sorted({l["cycle_id"] for l in logs if l["cycle_id"]})}
+    if out["schedule"]:
+        out["schedule_label"] = D3_SCHEDULES[out["schedule"]]
+        out["started_on"] = starts.get(cycle["id"])
+        out["status"] = plan_for(out["schedule"], out["started_on"], min(today, cycle["ended_on"] or today))
+    if not logs:
+        return out
+    first = max(logs[0]["at"][:10], d_from or "")
+    last = min(d_to or (cycle and cycle["ended_on"]) or today, today)
+    if last < first:
+        last = logs[-1]["at"][:10]
+    totals = day_totals(logs)
+    day_cycle = {}
+    for l in logs:
+        day_cycle.setdefault(l["at"][:10], l["cycle_id"])
+    sups = list_supplements()
+    logged = {item_key(it) for l in logs for it in l["items"]}
+    rows = [s for s in sups if not s["archived"] or str(s["id"]) in logged]
+    known = {str(s["id"]) for s in rows}
+    for k in sorted(logged - known):  # supplement deleted since: totals only
+        it = next(it for l in logs for it in l["items"] if item_key(it) == k)
+        rows.append({"id": None, "name": it["name"], "uom": it["uom"], "target_min": None, "target_max": None,
+                     "role": "", "archived": 1, "course_days": None, "key": k})
+    windows = course_windows({s["id"]: s["course_days"] for s in rows if s["id"] and s["course_days"]})
+    per = {r.get("key") or str(r["id"]): {"name": r["name"], "uom": r["uom"], "role": r["role"], "target": "",
+                                          "days_met": 0, "days_taken": 0, "days_expected": 0, "total": 0.0,
+                                          "food": 0.0} for r in rows}
+    loading = {}
+    d0, d1 = dt.date.fromisoformat(first), dt.date.fromisoformat(last)
+    for i in range((d1 - d0).days + 1 if (d1 - d0).days < 1000 else 0):
+        date = (d0 + dt.timedelta(days=i)).isoformat()
+        cid = day_cycle.get(date)
+        if cid is None and cycle:
+            cid = cycle["id"]
+        elif cid is None and cycle_id != "none":  # a day with nothing logged: the cycle whose dates cover it
+            cid = next((c["id"] for c in cycles.values() if c["started_on"] <= date
+                        and (not c["ended_on"] or date <= c["ended_on"])), None)
+        c = cycles.get(cid)
+        plan = plan_for(c["d3_schedule"] if c else "maintenance", starts.get(cid), date)
+        if plan["weekly_loading"] and plan["day"]:
+            loading.setdefault((cid, plan["loading_week"]), False)
+        day = totals.get(date, {})
+        lines, missed = [], []
+        for r in rows:
+            k = r.get("key") or str(r["id"])
+            t = day.get(k)
+            p = per[k]
+            target = plan["target"] if r["role"] == "d3" else r["target_min"]
+            if r["role"] == "d3":
+                p["target"] = "per schedule"
+            elif target is not None:
+                p["target"] = supplement_target(r)
+            expected = not r["archived"] and target is not None
+            if expected and r["course_days"]:
+                cs = course_state(windows.get(r["id"]), date)
+                expected = not cs or date <= cs["end"]
+            taken = (t["total"] - (t["loading"] if r["role"] == "d3" else 0)) if t else 0
+            met = target is not None and taken >= target - 1e-9
+            if t:
+                p["days_taken"] += 1
+                p["total"] += t["total"]
+                p["food"] += t["food"]
+                if r["role"] == "d3" and t["loading"] and plan["weekly_loading"]:
+                    loading[(cid, plan["loading_week"])] = True
+            if expected:
+                p["days_expected"] += 1
+                p["days_met"] += met
+                if not met:
+                    missed.append(r["name"] if not t else
+                                  f"{r['name']} below target ({fmt_amount(taken)} of {fmt_amount(target)} {r['uom']})".strip())
+            if t:
+                bits = [f"{fmt_amount(t['total'])} {t['uom']}".strip()]
+                if t["food"]:
+                    bits.append(f"{fmt_amount(t['food'])} from food" if t["food"] < t["total"] else "from food")
+                if r["role"] == "d3" and t["loading"]:
+                    bits.append("includes weekly loading dose")
+                lines.append({"name": r["name"], "text": bits[0] + (f" ({', '.join(bits[1:])})" if bits[1:] else ""),
+                              "met": met})
+        out["days"] += 1
+        out["complete_days"] += not missed
+        if daily:
+            out["daily"].append({"date": date, "phase": plan["phase"], "d3_target": plan["target"],
+                                 "weekly_loading": plan["weekly_loading"], "lines": lines, "missed": missed})
+    out["start"], out["end"] = first, last
+    out["supplements"] = [dict(v, total=round(v["total"], 2), food=round(v["food"], 2)) for v in per.values()
+                          if v["days_taken"] or v["days_expected"]]
+    if loading:
+        out["loading_doses"] = {"taken": sum(loading.values()), "expected": len(loading)}
+    return out

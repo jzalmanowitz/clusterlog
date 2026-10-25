@@ -109,6 +109,34 @@ with sync_playwright() as p:
     pg.wait_for_timeout(600)
     assert pg.locator("text=Running now").count() == 0
 
+    # D3 regimen: two dose times in a day add up; already-met supplements start unticked the second time
+    pg.click("#bar >> text=Track D3 Regimen")
+    pg.wait_for_selector(".sheet .supp")
+    assert pg.is_checked(".sheet .supp:has-text('Vitamin D3') input[name=on]")
+    shot("09c-d3-sheet")
+    pg.uncheck(".sheet .supp:has-text('Zinc') input[name=on]")
+    pg.click(".sheet .supp:has-text('Magnesium') label.opt:has-text('Food')")
+    pg.click(".sheet-foot >> text=Save doses")
+    pg.wait_for_selector(".jrow:has-text('D3 regimen')")
+    assert "Magnesium 400 mg (food)" in pg.inner_text(".jrow:has-text('D3 regimen')")
+    pg.click("#bar >> text=Track D3 Regimen")
+    pg.wait_for_selector(".sheet .supp")
+    assert pg.is_checked(".sheet .supp:has-text('Zinc') input[name=on]")
+    assert not pg.is_checked(".sheet .supp:has-text('Vitamin D3') input[name=on]")
+    assert "today 10,000 of 10,000 IU" in pg.inner_text(".sheet .supp:has-text('Vitamin D3')")
+    pg.click(".sheet-foot >> text=Save doses")
+    pg.wait_for_timeout(600)
+    assert pg.locator(".jrow:has-text('D3 regimen')").count() == 2
+    shot("09d-d3-journal")
+    pg.click(".jrow:has-text('D3 regimen') >> nth=0")
+    pg.wait_for_selector(".sheet-head >> text=Edit D3 regimen")
+    pg.click(".sheet-head .x")
+    pg.click(".tabs >> text=Stats")
+    pg.wait_for_selector("section h2:has-text('D3 regimen')")
+    shot("09e-d3-stats", full=True)
+    pg.click(".tabs >> text=Journal")
+    pg.wait_for_timeout(400)
+
     # Stats -> tap a treatment -> its history; switch to another med
     pg.click(".tabs >> text=Stats")
     pg.wait_for_selector("a.list-row:has-text('Oxygen')")
@@ -156,10 +184,20 @@ with sync_playwright() as p:
     pg.wait_for_timeout(300)
     assert pg.evaluate("document.documentElement.dataset.theme") is None
 
-    for route in ("#/treatments", "#/learnings", "#/loose"):
+    for route in ("#/treatments", "#/learnings", "#/loose", "#/supplements"):
         pg.goto(U + route)
         pg.wait_for_selector(".top")
         shot("11-" + route.strip("#/"))
+    pg.click("button.list-row:has-text('Vitamin B-50')")
+    pg.wait_for_selector(".sheet input[name=course_days]")
+    assert pg.input_value(".sheet input[name=course_days]") == "90"
+    shot("12-supplement-edit")
+    pg.click(".sheet-head .x")
+    pg.goto(U)
+    pg.wait_for_selector(".top")
+    pg.click("text=+ New cycle")
+    pg.wait_for_selector(".sheet label.opt:has-text('Four-week loading')")
+    shot("13-new-cycle-d3")
     b.close()
 
 if errors:

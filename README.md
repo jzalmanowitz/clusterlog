@@ -109,12 +109,12 @@ Screen*. It then opens full-screen like an app.
 
 ```
 Home ─┬─ Cycle (container: "Fall 2026") ─┬─ Start headache → live Attack screen
-      │                                   ├─ + Med / + Note (bottom bar)
+      │                                   ├─ + Add event · Track D3 Regimen (bottom bar)
       │                                   └─ Journal · Chart · Stats tabs
       ├─ Outside a cycle (injections, appointments between cycles)
       ├─ Cycle learnings
       ├─ Report for neurologist
-      └─ Meds & treatments · Settings
+      └─ Meds & treatments · D3 regimen supplements · Settings
 ```
 
 - **Cycle** — create one when a cycle begins. Days and **weeks are counted from
@@ -168,6 +168,24 @@ curve, weather at start (↑/↓ vs. previous headache) and the timeline.
   for spreadsheets, and a printable page with the daily chart. The report includes
   a **Medication log**: every med, each day it was used, with times, doses,
   session lengths and which headache it was for.
+- **D3 regimen** — a passive tracker (no reminders) for the vitamin D3 regimen:
+  high-dose D3 plus cofactors (omega 3, calcium citrate, magnesium, K2, A, B-50,
+  zinc, boron). Each cycle picks a schedule: **Two-week loading** (50,000 IU a day
+  for 7 days, 40,000 for 6), **Four-week loading** (20,000 a day plus one 50,000
+  dose a week for 2 weeks, then 15,000 for 2 weeks) or **Maintenance only**.
+  Day 1 is the cycle's *Loading started on* date, or if that's blank, the first
+  D3 dose tracked in the cycle. Days before it count as maintenance. The app shows the days left
+  until maintenance (10,000 IU a day). Outside a cycle, D3 is always maintenance.
+  **Track D3 Regimen** (cycle screen bottom bar) lists every supplement with its
+  dose. Untick what you skipped, change an amount, and mark it *Supplement* or
+  *Food*. Log as many times a day as you like: amounts add up against each daily
+  target, and anything already met that day starts unticked. Supplements with a
+  course length (B-50: 90 days) show the days remaining from the first dose.
+  Doses appear in the Journal (tag `D3`) but never on the chart. Stats has a
+  *D3 regimen* section (days at target per supplement, weekly loading doses), and
+  the report has a D3 regimen summary and a day-by-day log. Add, edit or remove
+  supplements under Home → *D3 regimen supplements*. Discuss the regimen with
+  your healthcare provider before starting it.
 - **Import an old text log** (Settings) — paste Evernote/Docs logs in the
   `Feb 7` / `0042 - start oxygen, kip 6` format. Lines become notes; "kip N"
   lines become pain points. Then create past attacks with start/end times and the
@@ -233,10 +251,13 @@ phone (Safari) ──HTTP──▶ Docker container "clusterlog" (port 8765 → 
 
 | Table | Key columns |
 |---|---|
-| `cycles` | `name`, `started_on`, `ended_on` (null = active), `notes`, `learnings` |
+| `cycles` | `name`, `started_on`, `ended_on` (null = active), `notes`, `learnings`, `d3_schedule` (two_week · four_week · null = maintenance), `d3_started_on` (loading day 1; null = first D3 dose) |
 | `treatments` | `name`, `category` (abortive · preventive · emergent · supplement · other), `default_amount`, `uom`, `uom_prefix` ("level 3"), `quick`, `archived`, `sort`, `max_per_day` |
 | `attacks` | `cycle_id`, `started_at`, `ended_at` (null = in progress), `side`, `locations` (JSON), `pain_types` (JSON), `notes`, `weather` (JSON, read-only) |
 | `entries` | `kind` (pain · treatment · note · event), `at`, `cycle_id`, `attack_id`, `kip`, `phase`, `treatment_id`, `amount`, `title` (dose label snapshot, e.g. "Oxygen, 15 L/min"), `note` |
+| `supplements` | D3 regimen list: `name`, `default_amount`, `uom`, `target_min`/`target_max` (daily), `target_note`, `course_days`, `role` ('d3' = target from the schedule), `archived`, `sort` |
+| `supplement_logs` | one Track D3 Regimen save: `at`, `cycle_id`, `note` |
+| `supplement_items` | `log_id`, `supplement_id`, `name`/`uom` (snapshot), `amount`, `source` (supplement · food), `loading` (four-week weekly 50,000 IU dose) |
 | `settings` | key/value (location, patient/neurologist, pain option lists, text size) |
 | view `attacks_v` | attacks + `number` (per cycle), `peak_kip`, `last_kip` |
 
@@ -266,7 +287,10 @@ GET  /api/treatments?include_archived=      POST /api/treatments              PU
 POST /api/attacks   GET /api/attacks/active   GET /api/attacks/last-details
 GET|PATCH|DELETE /api/attacks/{id}          POST /api/attacks/{id}/end
 POST /api/entries   PUT|DELETE /api/entries/{id}
-GET  /api/journal?cycle_id=(id|none)&start=&end=
+GET  /api/supplements?include_archived=     POST /api/supplements             PUT|DELETE /api/supplements/{id}
+POST /api/supplement-logs   PUT|DELETE /api/supplement-logs/{id}
+GET  /api/regimen?date=&cycle_id=&exclude_log=   (schedule position + that day's totals vs targets)
+GET  /api/journal?cycle_id=(id|none)&start=&end=   (includes supplement_logs)
 GET  /api/recent?since=                     GET /api/stats?cycle_id=&start=&end=&today=
 GET  /api/chart/daily.svg?cycle_id=&start=&end=&theme=(dark|light)&meds=(key|all|none)
 GET  /api/report?start=&end=&cycle_id=&format=(text|html|csv)&download=true

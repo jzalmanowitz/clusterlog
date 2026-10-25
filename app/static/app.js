@@ -12,12 +12,13 @@ const CATS = [['abortive', 'Abortive'], ['preventive', 'Preventive'], ['emergent
   ['supplement', 'Supplement'], ['other', 'Other']];
 const CAT_LABEL = Object.fromEntries(CATS);
 const SIDES = ['Left', 'Right', 'Both', 'Alternating'];
-const TAGS = { pain: 'PAIN', treatment: 'MED', note: 'NOTE', event: 'EVENT' };
+const TAGS = { pain: 'PAIN', treatment: 'MED', note: 'NOTE', event: 'EVENT', supplement: 'D3' };
+const D3_SCHEDULES = [['maintenance', 'Maintenance only'], ['two_week', 'Two-week loading'], ['four_week', 'Four-week loading']];
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const S = {
-  treatments: [], settings: {}, entries: {}, attacks: {},
+  treatments: [], settings: {}, entries: {}, attacks: {}, supps: {},
   attack: null,          // attack shown on the attack screen
   tab: 'journal',        // cycle screen tab
   meds: 'key',           // chart medication filter
@@ -30,6 +31,7 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pad = n => String(n).padStart(2, '0');
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const fmtAmt = v => (v == null || v === '' ? '' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 }));
 
 async function api(path, opts = {}) {
   const o = { method: 'GET', headers: {}, ...opts };
@@ -261,6 +263,13 @@ function entryText(e) {
 const entryRow = e => `<div class="jrow${e.attack_id ? ' in' : ''}" data-act="editEntry" data-id="${e.id}" role="button" tabindex="0">
   <span class="t">${hhmm(e.at)}</span><span class="tag">${TAGS[e.kind]}</span><span class="txt">${entryText(e)}</span></div>`;
 
+/** One "Track D3 Regimen" log: every supplement taken at that time. */
+function suppRow(l) {
+  const items = l.items.map(i => `${esc(i.name)} ${fmtAmt(i.amount)}${i.uom && i.amount != null ? ' ' + esc(i.uom) : ''}${i.loading ? ' (weekly loading dose)' : ''}${i.source === 'food' ? ' (food)' : ''}`);
+  return `<div class="jrow" data-act="editSupp" data-id="${l.id}" role="button" tabindex="0">
+  <span class="t">${hhmm(l.at)}</span><span class="tag">${TAGS.supplement}</span><span class="txt"><b>D3 regimen</b> · ${items.join(' · ')}${l.note ? ' — ' + esc(l.note) : ''}</span></div>`;
+}
+
 function attackRow(a, which, link = true) {
   const tagName = link ? 'a' : 'div';
   const href = link ? ` href="#/attack/${a.id}"` : ` data-act="editAttack" data-id="${a.id}" role="button" tabindex="0"`;
@@ -277,15 +286,17 @@ function attackRow(a, which, link = true) {
 }
 
 /** Entries + attack start/end rows, grouped by (cycle) week and day. */
-function journalHTML(attacks, entries, cycle, { asc = false, weeks = true, links = true } = {}) {
+function journalHTML(attacks, entries, cycle, { asc = false, weeks = true, links = true, supps = [] } = {}) {
   attacks.forEach(a => { S.attacks[a.id] = a; });
   entries.forEach(e => { S.entries[e.id] = e; });
+  supps.forEach(l => { S.supps[l.id] = l; });
   const items = [];
   for (const a of attacks) {
     items.push({ at: a.started_at, o: 0, id: a.id, html: attackRow(a, 'start', links) });
     if (a.ended_at) items.push({ at: a.ended_at, o: 2, id: a.id, html: attackRow(a, 'end', links) });
   }
   for (const e of entries) items.push({ at: e.at, o: 1, id: e.id, html: entryRow(e) });
+  for (const l of supps) items.push({ at: l.at, o: 1, id: l.id, html: suppRow(l) });
   items.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : (x.o - y.o) || (x.id - y.id)));
   const byDay = new Map();
   for (const it of items) {
@@ -352,6 +363,7 @@ async function viewHome() {
       <a class="card" href="#/learnings"><b>Cycle learnings</b><div class="small muted">${learn.length ? `${plural(learn.length, 'note')} from past you` : 'What past you wants future you to remember'}</div></a>
       <a class="card" href="#/export"><b>Report for neurologist</b><div class="small muted">Pick dates · email · print · CSV</div></a>
       <a class="card" href="#/treatments"><b>Meds &amp; treatments</b><div class="small muted">${activeTreatments().length} defined</div></a>
+      <a class="card" href="#/supplements"><b>D3 regimen supplements</b><div class="small muted">Vitamin D3, cofactors &amp; daily targets</div></a>
     </section>`;
   app.innerHTML = h;
   if (active) setBar(`<a class="btn primary big" href="#/attack/${active.id}">● Open headache · <span class="ago" data-since="${active.started_at}">${fmtDur(minsSince(active.started_at))}</span></a>`);
@@ -418,7 +430,8 @@ async function viewLog(cycle) {
 
   const body = $('#tabbody');
   if (S.tab === 'journal') {
-    body.innerHTML = (j.attacks.length || j.entries.length) ? journalHTML(j.attacks, j.entries, cycle)
+    body.innerHTML = (j.attacks.length || j.entries.length || j.supplement_logs.length)
+      ? journalHTML(j.attacks, j.entries, cycle, { supps: j.supplement_logs })
       : `<div class="empty"><p>Nothing logged yet.</p><p class="small">Tap <b>Start headache</b> when shadows begin, or log a med or note below.</p></div>`;
   } else if (S.tab === 'chart') {
     renderChart(body, cid);
@@ -427,9 +440,10 @@ async function viewLog(cycle) {
   }
 
   const c = cycle ? cycle.id : '';
-  setBar(`${here ? `<a class="btn primary grow" href="#/attack/${active.id}">● Headache · <span class="ago" data-since="${active.started_at}">${fmtDur(minsSince(active.started_at))}</span></a>`
-    : `<button class="btn primary grow" data-act="startAttack" data-cycle="${c}">Start headache</button>`}
-    <button class="btn" data-act="addEvent" ${here ? `data-attack="${active.id}"` : `data-cycle="${c}"`}>+ Add event</button>`);
+  setBar(`${here ? `<a class="btn primary sm" href="#/attack/${active.id}">● Headache · <span class="ago" data-since="${active.started_at}">${fmtDur(minsSince(active.started_at))}</span></a>`
+    : `<button class="btn primary sm" data-act="startAttack" data-cycle="${c}">Start headache</button>`}
+    <button class="btn sm" data-act="addEvent" ${here ? `data-attack="${active.id}"` : `data-cycle="${c}"`}>+ Add event</button>
+    <button class="btn sm" data-act="trackD3" data-cycle="${c}">Track D3 Regimen</button>`);
 }
 
 async function renderChart(el, cid) {
@@ -473,7 +487,31 @@ async function renderStats(el, cid) {
     }).join('')}
       <p class="help">Tap a treatment to see every time it was used. "To headache end" = median time from the first dose of that treatment to the end of the headache.</p></section>`;
   }
+  h += regimenStatsHTML(s.regimen);
   el.innerHTML = h;
+}
+
+function d3StatusText(st) {
+  if (!st) return '';
+  if (st.schedule === 'maintenance') return `Maintenance · ${fmtAmt(st.target)} IU a day`;
+  if (!st.day) return `${D3_SCHEDULES.find(x => x[0] === st.schedule)[1]} · starts with your first D3 dose`;
+  return `${st.phase} · day ${st.day} · ${st.until_maintenance ? `${plural(st.until_maintenance, 'day')} until maintenance · ` : ''}D3 ${fmtAmt(st.target)} IU a day`
+    + (st.weekly_loading ? ' + 50,000 IU once this week' : '');
+}
+
+function regimenStatsHTML(g) {
+  if (!g || (!g.days && (!g.schedule || g.schedule === 'maintenance'))) return '';
+  let h = `<section><h2>D3 regimen</h2>`;
+  if (g.schedule) h += `<p><b>${esc(g.schedule_label)}</b><span class="small muted" style="display:block">${esc(d3StatusText(g.status))}</span></p>`;
+  if (!g.days) return h + `<p class="muted">Nothing tracked yet. Tap <b>Track D3 Regimen</b> below.</p></section>`;
+  h += `<div class="tiles">
+    <div class="tile"><div class="num">${g.complete_days}</div><div class="small">days all targets met · of ${g.days}</div></div>
+    ${g.loading_doses ? `<div class="tile"><div class="num">${g.loading_doses.taken}/${g.loading_doses.expected}</div><div class="small">weekly 50,000 IU loading doses</div></div>` : ''}
+  </div>`;
+  h += g.supplements.map(p => `<div class="list-row"><div><b>${esc(p.name)}</b>
+    <div class="small muted">${p.days_taken ? `total ${fmtAmt(p.total)} ${esc(p.uom)}${p.food ? ` · ${fmtAmt(p.food)} from food` : ''}` : 'not taken'}${p.target ? ` · target ${esc(p.target)}` : ''}</div></div>
+    <div>${p.days_expected ? `<b>${p.days_met}/${p.days_expected}</b><div class="small muted">days at target</div>` : '<span class="muted">–</span>'}</div></div>`).join('');
+  return h + `<p class="help">Each day's doses are added up and compared with the daily target; Vitamin D3's target follows the cycle's loading schedule. Counted from the first tracked day.</p></section>`;
 }
 
 function hourSVG(hours) {
@@ -637,6 +675,26 @@ async function viewTreatments() {
 const treatmentRow = t => `<button class="list-row" data-act="editTreatment" data-id="${t.id}">
   <span><b>${esc(t.name)}</b><span class="small muted" style="display:block">${t.mode === 'duration' ? 'start / stop · ' : ''}${t.uom ? 'unit: ' + esc(t.uom) : 'no unit'}${t.default_amount ? ' · default ' + esc(doseLabel(t, t.default_amount)) : ''}</span></span>
   <span class="small">${t.quick ? '<span class="pill">QUICK</span>' : ''}</span></button>`;
+
+/* ---------------------------------------------------------------- views: supplements */
+
+async function viewSupplements() {
+  const list = await api('/supplements?include_archived=true');
+  let h = pageHead('D3 regimen supplements', '#/', `<button class="btn sm" data-act="editSupplement">+ Add</button>`);
+  h += `<p class="muted">The supplements listed under <b>Track D3 Regimen</b>, with the amount per dose and the daily target. Vitamin D3's target follows the loading schedule chosen for each cycle. Discuss the regimen with your healthcare provider.</p>`;
+  const row = s => `<button class="list-row" data-act="editSupplement" data-id="${s.id}">
+    <span><b>${esc(s.name)}</b><span class="small muted" style="display:block">${s.role === 'd3' ? 'target follows the loading schedule' : suppTarget(s) ? 'target ' + esc(suppTarget(s)) + ' a day' : 'no target'}${s.default_amount != null ? ` · dose ${fmtAmt(s.default_amount)} ${esc(s.uom)}` : ''}${s.course_days ? ` · ${s.course_days}-day course` : ''}</span></span>
+    <span class="muted">›</span></button>`;
+  const active = list.filter(s => !s.archived), arch = list.filter(s => s.archived);
+  h += `<section>${active.map(row).join('') || '<p class="muted">None yet.</p>'}</section>`;
+  if (arch.length) h += `<section><h2>Archived</h2>${arch.map(row).join('')}</section>`;
+  app.innerHTML = h;
+  S.supplements = list;
+  setBar(`<button class="btn primary" data-act="editSupplement">+ Add supplement</button>`);
+}
+const suppTarget = s => (s.target_min == null && s.target_max == null ? ''
+  : s.target_min != null && s.target_max != null && s.target_max !== s.target_min ? `${fmtAmt(s.target_min)}–${fmtAmt(s.target_max)} ${s.uom}`
+    : `${fmtAmt(s.target_min ?? s.target_max)} ${s.uom}`).trim();
 
 /* ---------------------------------------------------------------- views: one treatment */
 
@@ -802,14 +860,23 @@ function cycleSheet(c = null) {
     <label class="f">Started on</label><input type="date" name="started_on" value="${c?.started_on || today()}">
     <label class="f">Ended on <span class="muted">(leave blank while active)</span></label>
     <input type="date" name="ended_on" value="${c?.ended_on || ''}">
+    <label class="f">D3 regimen</label><div class="chips" style="margin-bottom:0">${radios('d3_schedule', D3_SCHEDULES, c?.d3_schedule || 'maintenance')}</div>
+    <p class="help">Two-week: 50,000 IU a day for 7 days, then 40,000 IU for 6 days. Four-week: 20,000 IU a day plus one 50,000 IU dose a week for 2 weeks, then 15,000 IU a day for 2 weeks. Both then drop to 10,000 IU a day.</p>
+    <div id="d3startwrap"><label class="f">Loading started on <span class="muted">(blank = your first D3 dose tracked in this cycle)</span></label>
+    <input type="date" name="d3_started_on" value="${c?.d3_started_on || ''}"></div>
     <label class="f">Notes</label><textarea name="notes" rows="3">${esc(c?.notes || '')}</textarea>
     ${c?.ended_on || c?.learnings ? `<label class="f">Cycle learnings</label><textarea name="learnings" rows="6">${esc(c?.learnings || '')}</textarea>` : ''}`, {
     submitLabel: c ? 'Save' : 'Create cycle',
+    onOpen: form => {
+      const sync = () => $('#d3startwrap', form).classList.toggle('hide', (formValues(form).d3_schedule || 'maintenance') === 'maintenance');
+      form.addEventListener('change', sync); sync();
+    },
     extra: c ? `${c.ended_on ? '' : `<button type="button" class="btn" data-act="endCycle" data-id="${c.id}">End cycle</button>`}
       <button type="button" class="btn ghost danger" data-act="deleteCycle" data-id="${c.id}">Delete</button>` : '',
     onSubmit: async f => {
       const body = { name: f.name, started_on: f.started_on, ended_on: f.ended_on || null, notes: f.notes,
-        learnings: f.learnings ?? c?.learnings ?? '' };
+        learnings: f.learnings ?? c?.learnings ?? '', d3_schedule: f.d3_schedule || 'maintenance',
+        d3_started_on: f.d3_schedule && f.d3_schedule !== 'maintenance' ? f.d3_started_on || null : null };
       if (c) {
         const saved = await api('/cycles/' + c.id, { method: 'PUT', body });
         if (saved.ended_on && !c.ended_on && !saved.learnings) setTimeout(() => learningsSheet(saved, true), 50);
@@ -1021,6 +1088,94 @@ async function endAttackSheet(a) {
   });
 }
 
+/** Track D3 Regimen: every active supplement pre-filled with its dose; untick what you skipped. Totals add up through the day. */
+async function regimenSheet({ cycle = null, log = null } = {}) {
+  const cid = log ? log.cycle_id : (cycle ? +cycle : null);
+  const at = log ? log.at : nowLocal();
+  const r = await api(`/regimen?date=${at.slice(0, 10)}${cid ? '&cycle_id=' + cid : ''}${log ? '&exclude_log=' + log.id : ''}`);
+  const mine = log ? Object.fromEntries(log.items.filter(i => !i.loading).map(i => [i.supplement_id, i])) : {};
+  const loadingItem = log?.items.find(i => i.loading);
+  const list = r.supplements.filter(s => !s.archived || mine[s.id]);
+  const d3 = r.d3;
+  const hint = s => {
+    const bits = [s.taken ? `today ${fmtAmt(s.taken)}${s.target ? ' of ' + s.target : ''}${s.met ? ' ✓' : ''}` : s.target ? `target ${s.target}` : ''];
+    if (s.course) bits.push(s.course.days_left ? `${plural(s.course.days_left, 'day')} remaining` : 'course complete');
+    else if (s.course_days) bits.push(`${s.course_days}-day course`);
+    return bits.filter(Boolean).join(' · ');
+  };
+  const row = s => {
+    const it = mine[s.id];
+    const on = log ? !!it : !s.met && !(s.course && !s.course.days_left);
+    const amt = it ? it.amount : s.role === 'd3' && s.remaining > 0 ? s.remaining : s.default_amount;
+    return `<div class="supp" data-sid="${s.id}">
+      <div class="check"><input type="checkbox" id="sp${s.id}" name="on" value="${s.id}"${on ? ' checked' : ''}><label for="sp${s.id}"><b>${esc(s.name)}</b>
+        <span class="small muted hint" style="display:block">${esc(hint(s))}</span></label></div>
+      <div class="supp-dose"><input name="amt_${s.id}" inputmode="decimal" value="${amt ?? ''}" aria-label="${esc(s.name)} amount"><span class="uom">${esc(s.uom)}</span>
+        <span class="chips">${radios('src_' + s.id, [['supplement', 'Supplement'], ['food', 'Food']], it?.source || 'supplement')}</span></div></div>`;
+  };
+  const d3s = list.find(s => s.role === 'd3');
+  const loadingRow = d3s && (d3.weekly_loading || loadingItem) ? `<div class="supp">
+    <div class="check"><input type="checkbox" id="sploading" name="loading"${loadingItem ? ' checked' : ''}><label for="sploading"><b>D3 weekly loading dose</b>
+      <span class="small muted" style="display:block">once a week in weeks 1 and 2 · ${d3.loading_taken ? 'already taken this week ✓' : 'not taken yet this week'}</span></label></div>
+    <div class="supp-dose"><input name="loading_amt" inputmode="decimal" value="${loadingItem ? loadingItem.amount ?? '' : 50000}" aria-label="Loading dose amount"><span class="uom">IU</span></div></div>` : '';
+  openSheet(log ? 'Edit D3 regimen' : 'Track D3 Regimen', `
+    <div class="card" style="margin-top:16px"><b>${esc(d3.schedule_label)}</b>${cid ? '' : ' <span class="muted">(outside a cycle)</span>'}
+      <div class="small muted">${esc(d3StatusText(d3))}${d3.schedule !== 'maintenance' && !d3.day ? ` · ${plural(d3.until_maintenance, 'day')} of loading` : ''}</div></div>
+    <label class="f">When</label><input type="datetime-local" name="at" value="${at}">
+    <label class="f">Taken <span class="muted">— untick what you skipped; change an amount if it differs</span></label>
+    ${list.map(row).join('')}${loadingRow}
+    <label class="f">Note <span class="muted">(optional)</span></label><input name="note" value="${esc(log?.note || '')}" autocomplete="off">
+    <p class="help">Several times a day is fine: each save adds to the day's totals. <a href="#/supplements">Add or remove supplements</a></p>`, {
+    submitLabel: log ? 'Save' : 'Save doses',
+    extra: log ? `<button type="button" class="btn ghost danger" data-act="deleteSupp" data-id="${log.id}">Delete</button>` : '',
+    onSubmit: async f => {
+      const num = (v, name) => {
+        if (v == null || String(v).trim() === '') return null;
+        const n = Number(String(v).replace(/,/g, ''));
+        if (!isFinite(n) || n < 0) throw new Error(`${name}: amount isn't a number`);
+        return n;
+      };
+      const items = (f.on || []).map(id => ({ supplement_id: +id, source: f['src_' + id] || 'supplement',
+        amount: num(f['amt_' + id], list.find(s => s.id === +id).name) }));
+      if (f.loading) items.push({ supplement_id: d3s.id, amount: num(f.loading_amt, 'Loading dose'), source: 'supplement', loading: true });
+      if (!items.length) throw new Error('Tick at least one supplement');
+      const saved = await api(log ? '/supplement-logs/' + log.id : '/supplement-logs', { method: log ? 'PUT' : 'POST',
+        body: { at: f.at, cycle_id: cid, note: f.note, items } });
+      if (log) toast('Saved');
+      else toast(`D3 regimen · ${plural(saved.items.length, 'supplement')} · ${hhmm(saved.at)}`, [
+        { label: 'Undo', fn: async () => { await api('/supplement-logs/' + saved.id, { method: 'DELETE' }); refresh(); } }]);
+    },
+  });
+}
+
+function supplementEditSheet(s = null) {
+  const d3 = s?.role === 'd3';
+  openSheet(s ? 'Edit supplement' : 'New supplement', `
+    <label class="f">Name</label><input name="name" value="${esc(s?.name || '')}" placeholder="e.g. Vitamin C">
+    <div class="row"><div><label class="f">Dose</label><input name="default_amount" inputmode="decimal" value="${s?.default_amount ?? ''}" placeholder="500"></div>
+      <div><label class="f">Unit</label><input name="uom" value="${esc(s?.uom || '')}" placeholder="mg, mcg, IU"></div></div>
+    ${d3 ? `<p class="help">The daily target follows the cycle's loading schedule (10,000 IU a day outside a cycle and once maintenance starts).</p>`
+      : `<div class="row"><div><label class="f">Daily target</label><input name="target_min" inputmode="decimal" value="${s?.target_min ?? ''}" placeholder="minimum"></div>
+      <div><label class="f">Up to <span class="muted">(optional)</span></label><input name="target_max" inputmode="decimal" value="${s?.target_max ?? ''}" placeholder="maximum"></div></div>`}
+    <label class="f">Note <span class="muted">(optional)</span></label><input name="target_note" value="${esc(s?.target_note || '')}" placeholder="e.g. glycinate or citrate">
+    ${d3 ? '' : `<label class="f">Course length in days <span class="muted">(blank = ongoing)</span></label>
+    <input name="course_days" inputmode="numeric" value="${s?.course_days ?? ''}" placeholder="e.g. 90 for B-50">
+    <p class="help">With a course length, Track D3 Regimen shows how many days remain, counted from the first dose.</p>`}
+    ${s ? `<div class="check"><input type="checkbox" id="sar" name="archived" data-bool${s.archived ? ' checked' : ''}><label for="sar">Archived (hidden from Track D3 Regimen)</label></div>` : ''}
+    <label class="f">Sort order <span class="muted">(lower = first)</span></label><input name="sort" inputmode="numeric" value="${s?.sort ?? 100}">`, {
+    submitLabel: s ? 'Save' : 'Add',
+    extra: s ? `<button type="button" class="btn ghost danger" data-act="deleteSupplement" data-id="${s.id}">${d3 ? 'Archive' : 'Delete'}</button>` : '',
+    onSubmit: async f => {
+      const num = v => (String(v ?? '').trim() === '' ? null : Number(v));
+      const body = { name: f.name, uom: f.uom, target_note: f.target_note, default_amount: num(f.default_amount),
+        target_min: d3 ? s.target_min : num(f.target_min), target_max: d3 ? s.target_max : num(f.target_max),
+        course_days: d3 ? null : parseInt(f.course_days, 10) || null, archived: !!f.archived, sort: parseInt(f.sort, 10) || 0 };
+      for (const k of ['default_amount', 'target_min', 'target_max']) if (Number.isNaN(body[k])) throw new Error('Amounts must be numbers');
+      await api(s ? '/supplements/' + s.id : '/supplements', { method: s ? 'PUT' : 'POST', body });
+    },
+  });
+}
+
 function treatmentEditSheet(t = null) {
   openSheet(t ? 'Edit treatment' : 'New treatment', `
     <label class="f">Name</label><input name="name" value="${esc(t?.name || '')}" placeholder="e.g. Zomig nasal spray">
@@ -1108,6 +1263,18 @@ const ACT = {
     });
   },
   addEvent: d => addEventSheet(d),
+  trackD3: d => regimenSheet({ cycle: d.cycle || null }),
+  editSupp: d => { const l = S.supps[d.id]; if (l) regimenSheet({ log: l }); },
+  deleteSupp: async d => {
+    if (!confirm('Delete these supplement doses?')) return;
+    await api('/supplement-logs/' + d.id, { method: 'DELETE' }); closeSheet(); refresh();
+  },
+  editSupplement: d => supplementEditSheet(d.id ? S.supplements.find(s => s.id === +d.id) : null),
+  deleteSupplement: async d => {
+    if (!confirm('Remove this supplement? If it has been logged it will be archived instead, so your history stays intact.')) return;
+    const r = await api('/supplements/' + d.id, { method: 'DELETE' });
+    closeSheet(); toast(r.archived ? 'Archived' : 'Deleted'); refresh();
+  },
   editTreatment: d => treatmentEditSheet(d.id ? treatment(d.id) : null),
   deleteTreatment: async d => {
     if (!confirm('Delete this treatment? If it has been used it will be archived instead, so your history stays intact.')) return;
@@ -1202,6 +1369,7 @@ const ROUTES = [
   [/^#\/loose$/, viewLoose],
   [/^#\/learnings$/, viewLearnings],
   [/^#\/treatments$/, viewTreatments],
+  [/^#\/supplements$/, viewSupplements],
   [/^#\/med\/(\d+)\/(\d+|none|all)$/, viewMed],
   [/^#\/export$/, viewExport],
   [/^#\/settings$/, viewSettings],

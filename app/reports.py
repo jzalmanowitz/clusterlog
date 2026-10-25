@@ -110,6 +110,16 @@ def build(d_from, d_to, cycle_id=None):
             dd["attacks"] += 1
         dd["lines"].append(line(at, typ, obj, prev_w))
 
+    regimen = store.regimen_stats(cycle_id, d_from, d_to, daily=True)
+    starts = store.regimen_starts()
+    regimen["schedules"] = []
+    for c in sorted((cycles[x] for x in regimen.get("cycle_ids", []) if x in cycles), key=lambda c: c["started_on"]):
+        sched = c["d3_schedule"] or "maintenance"
+        start = starts.get(c["id"])
+        maint = (dt.date.fromisoformat(start) + dt.timedelta(days=store.D3_LOAD_DAYS[sched])).isoformat() \
+            if start and sched in store.D3_LOAD_DAYS else None
+        regimen["schedules"].append({"cycle": c["name"], "label": store.D3_SCHEDULES[sched], "start": start,
+                                     "maintenance_from": maint})
     s = store.settings_raw()
     return {
         "start": d_from, "end": d_to,
@@ -121,7 +131,7 @@ def build(d_from, d_to, cycle_id=None):
         "stats": stats, "weeks": weeks,
         "meds": [{"name": t["name"], "category": t["category"], "mode": t["mode"], "days": med_days(t["name"], log.get(t["key"], []))}
                  for t in stats["treatments"]],
-        "attacks": attacks, "entries": entries, "cycle": stats_cycle,
+        "attacks": attacks, "entries": entries, "cycle": stats_cycle, "regimen": regimen,
     }
 
 
@@ -263,6 +273,7 @@ def text(r):
             L += ["", f"{m['name']} ({CAT_WORDS.get(m['category'], m['category'])})"]
             for d in m["days"]:
                 L.append(f"{d['label']}: {'; '.join(d['uses'])}")
+    L += regimen_text(r["regimen"])
     L += ["", "Daily log"]
     if not r["weeks"]:
         L += ["", "Nothing was logged in this period."]
@@ -281,6 +292,64 @@ def text(r):
                     L.append(f"{l['time']} Weather: {l['weather']}.")
     L += ["", "End of log."]
     return "\n".join(L) + "\n"
+
+
+REGIMEN_INTRO = ("Vitamin D3 regimen: supplement doses as recorded, added up per day and compared with each daily "
+                 "target. Amounts from food are counted and marked.")
+
+
+def schedule_line(sc):
+    s = f"{sc['cycle']}: {sc['label']}"
+    if sc["start"]:
+        s += f", loading started {fmt_date(sc['start'])}"
+    if sc["maintenance_from"]:
+        s += f", maintenance (10,000 IU a day) from {fmt_date(sc['maintenance_from'])}"
+    return s + "."
+
+
+def regimen_summary(g):
+    """[(label, text)] lines summarising adherence over the report period."""
+    out = [("Days covered", f"{g['days']} ({fmt_date(g['start'])} to {fmt_date(g['end'])}). "
+                             f"All daily targets met on {plural(g['complete_days'], 'day')}.")]
+    if g["loading_doses"]:
+        out.append(("Weekly D3 loading doses", f"{g['loading_doses']['taken']} of {g['loading_doses']['expected']} "
+                                               f"(50,000 IU each)."))
+    for p in g["supplements"]:
+        bits = []
+        if p["days_expected"]:
+            bits.append(f"target met on {p['days_met']} of {plural(p['days_expected'], 'day')}")
+        bits.append(f"taken on {plural(p['days_taken'], 'day')}, total {store.fmt_amount(p['total'])} {p['uom']}".strip()
+                    if p["days_taken"] else "not taken")
+        if p["food"]:
+            bits.append(f"{store.fmt_amount(p['food'])} {p['uom']} from food".strip())
+        target = f" ({p['target']} a day)" if p["target"] and p["role"] != "d3" else " (target per schedule)" if p["role"] else ""
+        out.append((p["name"] + target, "; ".join(bits) + "."))
+    return out
+
+
+def regimen_day_head(d):
+    head = f"{fmt_date(d['date'])}, {d['phase'].lower()}, D3 target {store.fmt_amount(d['d3_target'])} IU"
+    return head + (" plus the weekly 50,000 IU loading dose" if d["weekly_loading"] else "")
+
+
+def regimen_day_text(d):
+    s = "; ".join(f"{l['name']} {l['text']}" for l in d["lines"]) or "nothing recorded"
+    return s + (f". Missed: {', '.join(d['missed'])}." if d["missed"] else ". All targets met.")
+
+
+def regimen_text(g):
+    if not g["days"]:
+        return []
+    L = ["", "D3 regimen", "", REGIMEN_INTRO]
+    for sc in g["schedules"]:
+        L.append(f"Schedule: {schedule_line(sc)}")
+    L.append("")
+    for k, v in regimen_summary(g):
+        L.append(f"{k}: {v}")
+    L += ["", "Daily summary:"]
+    for d in g["daily"]:
+        L.append(f"{regimen_day_head(d)}: {regimen_day_text(d)}")
+    return L
 
 
 HTML_CSS = """
@@ -352,6 +421,18 @@ def html(r, include_chart=True):
                 o.append(f"<tr><td style='width:150px;white-space:nowrap'>{d['label']}</td>"
                          f"<td>{e('; '.join(d['uses']))}</td></tr>")
             o.append("</table>")
+    g = r["regimen"]
+    if g["days"]:
+        o.append(f"<h2>D3 regimen</h2><p class='muted'>{e(REGIMEN_INTRO)}</p>")
+        for sc in g["schedules"]:
+            o.append(f"<p><b>Schedule</b> {e(schedule_line(sc))}</p>")
+        o.append("<table class='stats'>")
+        for k, v in regimen_summary(g):
+            o.append(f"<tr><td style='width:40%'><b>{e(k)}</b></td><td>{e(v)}</td></tr>")
+        o.append("</table><h3>Daily summary</h3><table class='stats'>")
+        for d in g["daily"]:
+            o.append(f"<tr><td style='width:40%'>{e(regimen_day_head(d))}</td><td>{e(regimen_day_text(d))}</td></tr>")
+        o.append("</table>")
     o.append("<h2>Daily log</h2>")
     if not r["weeks"]:
         o.append("<p class='muted'>Nothing logged in this period.</p>")
@@ -402,6 +483,12 @@ def csv_text(r):
                                "", "", "", "", "", "", "",
                                e["ended_at"].replace("T", " ") if e.get("ended_at") else "",
                                minutes(e["at"], e["ended_at"]) if e.get("ended_at") else ""]))
+    for l in store.load_supplement_logs(r["regimen"]["scope"], r["start"], r["end"]):
+        for it in l["items"]:
+            rows.append((l["at"], [cycles.get(l["cycle_id"], ""), "", "supplement", "", "", it["name"],
+                                   store.fmt_amount(it["amount"]).replace(",", "") + (f" {it['uom']}" if it["uom"] else ""),
+                                   "weekly loading dose" if it["loading"] else "", f"from {it['source']}"
+                                   + (f". {l['note']}" if l["note"] else ""), "", "", "", "", "", "", "", "", ""]))
     rows.sort(key=lambda x: x[0])
     for at, vals in rows:
         w.writerow([at[:10], at[11:16], *vals])

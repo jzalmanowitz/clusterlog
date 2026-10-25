@@ -92,6 +92,18 @@ details.more summary { cursor: pointer; color: var(--mute); padding: 12px 0; min
 #bar .inner > * { flex: 1; min-width: 0; min-height: 56px; }
 #bar .inner > .grow { flex: 2; }
 
+/* ---------- D3 regimen sheet */
+.supp { border-bottom: 1px solid var(--hair); padding-bottom: 12px; }
+.supp .check { padding: 12px 0 8px; align-items: flex-start; }
+.supp .check label { min-width: 0; }
+.supp-dose { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-left: 32px; }
+.supp-dose input { width: 8.5em; flex: 0 0 auto; }
+.supp-dose .uom { color: var(--mute); min-width: 3ch; }
+.supp-dose .chips { margin: 0; gap: 4px; }
+.supp-dose .chip { min-height: 40px; padding: 8px 12px; font-size: var(--s-sm); }
+.supp:has(input[name="on"]:not(:checked)) .supp-dose,
+.supp:has(input[name="loading"]:not(:checked)) .supp-dose { opacity: .4; }
+
 /* ---------- cards & lists */
 .card { display: block; border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 8px;
   text-decoration: none; color: inherit; }
